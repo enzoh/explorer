@@ -240,8 +240,9 @@ class ExplorerHandler(http.server.SimpleHTTPRequestHandler):
             hourly_by_event_type = {str(i).zfill(2): {} for i in range(24)}
             videos_by_hour = {str(i).zfill(2): [] for i in range(24)}
             
-            video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
-            image_extensions = {'.jpg', '.jpeg', '.png', '.gif'}
+            # File extensions
+            VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
+            IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif'}
             
             # Get all event type directories (excluding test)
             for event_dir in day_path.iterdir():
@@ -252,8 +253,8 @@ class ExplorerHandler(http.server.SimpleHTTPRequestHandler):
                         if file_item.is_file():
                             if 'deadbeef' in file_item.name.lower():
                                 continue
-                            if (file_item.suffix.lower() in video_extensions or 
-                                file_item.suffix.lower() in image_extensions):
+                            if (file_item.suffix.lower() in VIDEO_EXTENSIONS or 
+                                file_item.suffix.lower() in IMAGE_EXTENSIONS):
                                 try:
                                     if file_item.stat().st_size > 0:
                                         # Extract hour from filename (format: HH-MM-SS-...)
@@ -280,7 +281,7 @@ class ExplorerHandler(http.server.SimpleHTTPRequestHandler):
                                                         
                                                         # Generate thumbnail hash for this video (only for video files, not images)
                                                         video_hash = None
-                                                        if file_item.suffix.lower() in video_extensions:
+                                                        if file_item.suffix.lower() in VIDEO_EXTENSIONS:
                                                             try:
                                                                 video_hash = self.generate_thumbnail_for_video(file_item, base_path)
                                                             except Exception as e:
@@ -361,8 +362,8 @@ class ExplorerHandler(http.server.SimpleHTTPRequestHandler):
     
     def find_thumbnail_path(self, data_dir: Path, hash_hex: str) -> Path:
         """
-        Find existing thumbnail path by searching recursively through directory structure.
-        This handles thumbnails that may have been stored at different directory depths.
+        Find existing thumbnail path by checking the expected location.
+        Uses get_thumbnail_path to determine where it should be, then checks if it exists.
         
         Args:
             data_dir: Base data directory
@@ -371,31 +372,8 @@ class ExplorerHandler(http.server.SimpleHTTPRequestHandler):
         Returns:
             Path object if found, None otherwise
         """
-        thumbnails_base = data_dir / '.thumbnails'
-        if not thumbnails_base.exists():
-            return None
-        
-        # Try flat location first
-        flat_path = thumbnails_base / f"{hash_hex}.jpg"
-        if flat_path.exists():
-            return flat_path
-        
-        # Recursively search subdirectories
-        # Try all possible depth combinations (up to reasonable limit)
-        hash_length = len(hash_hex)
-        for depth in range(1, min(8, hash_length // 2) + 1):  # Try up to 8 levels deep
-            path_parts = [thumbnails_base]
-            for i in range(depth):
-                if i * 2 + 2 > hash_length:
-                    break
-                next_chars = hash_hex[i * 2:(i * 2) + 2].upper()
-                path_parts.append(next_chars)
-            
-            search_path = Path(*path_parts) / f"{hash_hex}.jpg"
-            if search_path.exists():
-                return search_path
-        
-        return None
+        thumbnail_path = self.get_thumbnail_path(data_dir, hash_hex)
+        return thumbnail_path if thumbnail_path.exists() else None
     
     def get_thumbnail_path(self, data_dir: Path, hash_hex: str, file_limit: int = 1000) -> Path:
         """
@@ -450,8 +428,8 @@ class ExplorerHandler(http.server.SimpleHTTPRequestHandler):
         filename_hash = hashlib.sha256(video_path.name.encode('utf-8')).hexdigest()
         
         # Check if thumbnail already exists
-        thumbnail_path = self.find_thumbnail_path(data_dir, filename_hash)
-        if thumbnail_path and thumbnail_path.exists():
+        thumbnail_path = self.get_thumbnail_path(data_dir, filename_hash)
+        if thumbnail_path.exists():
             return filename_hash
         
         # Thumbnail doesn't exist - extract frame and generate it
@@ -459,7 +437,7 @@ class ExplorerHandler(http.server.SimpleHTTPRequestHandler):
         
         # Create temporary directory for extraction
         temp_dir = Path(tempfile.gettempdir())
-        temp_thumbnail = temp_dir / f"temp_thumb_{video_path.stem}_{os.getpid()}.jpg"
+        temp_thumbnail = temp_dir / f"temp_thumb_{video_path.stem}.jpg"
         
         try:
             # Extract frame
@@ -504,10 +482,10 @@ class ExplorerHandler(http.server.SimpleHTTPRequestHandler):
                     self.send_error(400, "Invalid hash format")
                     return
                 
-                # Try to find existing thumbnail first (handles recursive structure)
-                thumbnail_path = self.find_thumbnail_path(base_path, hash_hex)
+                # Try to find existing thumbnail
+                thumbnail_path = self.get_thumbnail_path(base_path, hash_hex)
                 
-                if thumbnail_path and thumbnail_path.exists() and thumbnail_path.is_file():
+                if thumbnail_path.exists() and thumbnail_path.is_file():
                     # Security check
                     data_dir = base_path.resolve()
                     thumbnail_resolved = thumbnail_path.resolve()
@@ -535,8 +513,8 @@ class ExplorerHandler(http.server.SimpleHTTPRequestHandler):
                     video_resolved = video_path.resolve()
                     if str(video_resolved).startswith(str(data_dir)) and video_path.exists():
                         # Check if it's actually a video file (not an image)
-                        video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
-                        if video_path.suffix.lower() in video_extensions:
+                        VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
+                        if video_path.suffix.lower() in VIDEO_EXTENSIONS:
                             # Generate thumbnail
                             hash_hex = self.generate_thumbnail_for_video(video_path, base_path)
                             if hash_hex:

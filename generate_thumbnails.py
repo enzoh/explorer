@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
 Generate thumbnails for videos by extracting a frame at 1 second,
-hashing it with SHA256, and storing in a hash-based directory structure.
+using filename-based hashing, and storing in a hash-based directory structure.
 """
 
-import os
 import sys
 import hashlib
 import subprocess
@@ -55,23 +54,6 @@ def extract_frame(video_path: Path, output_path: Path, timestamp: float = 1.0) -
         print(f"Error extracting frame from {video_path}: {e}")
         return False
 
-def hash_file(file_path: Path) -> str:
-    """
-    Calculate SHA256 hash of a file.
-    
-    Args:
-        file_path: Path to file to hash
-    
-    Returns:
-        Hexadecimal SHA256 hash string
-    """
-    sha256_hash = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        # Read file in chunks to handle large files
-        for byte_block in iter(lambda: f.read(4096), b""):
-            sha256_hash.update(byte_block)
-    return sha256_hash.hexdigest()
-
 def get_thumbnail_path(data_dir: Path, hash_hex: str, file_limit: int = 1000) -> Path:
     """
     Get the thumbnail path with recursive directory structure.
@@ -118,13 +100,15 @@ def process_video(video_path: Path, data_dir: Path, timestamp: float = 1.0) -> O
     """
     Process a single video file to generate and store thumbnail.
     
+    Uses filename-based hashing for simpler lookup - filename is sufficient to identify the video.
+    
     Args:
         video_path: Path to video file
         data_dir: Base data directory
         timestamp: Time in seconds to extract frame
     
     Returns:
-        Hash of the thumbnail if successful, None otherwise
+        Hash of the filename if successful, None otherwise
     """
     # Create temporary output path for extracted frame
     temp_dir = Path('/tmp') if Path('/tmp').exists() else Path.cwd() / 'temp'
@@ -132,27 +116,27 @@ def process_video(video_path: Path, data_dir: Path, timestamp: float = 1.0) -> O
     temp_thumbnail = temp_dir / f"temp_{video_path.stem}.jpg"
     
     try:
+        # Hash the filename to create a unique identifier
+        filename_hash = hashlib.sha256(video_path.name.encode('utf-8')).hexdigest()
+        
+        # Get destination path
+        thumbnail_path = get_thumbnail_path(data_dir, filename_hash)
+        
+        # Check if thumbnail already exists
+        if thumbnail_path.exists():
+            # Thumbnail already exists, skip
+            return filename_hash
+        
         # Extract frame
         if not extract_frame(video_path, temp_thumbnail, timestamp):
             return None
-        
-        # Hash the extracted frame
-        hash_hex = hash_file(temp_thumbnail)
-        
-        # Get destination path
-        thumbnail_path = get_thumbnail_path(data_dir, hash_hex)
         
         # Create directory if it doesn't exist
         thumbnail_path.parent.mkdir(parents=True, exist_ok=True)
         
         # Move thumbnail to final location
-        if thumbnail_path.exists():
-            # Thumbnail already exists, skip
-            temp_thumbnail.unlink()
-            return hash_hex
-        
         temp_thumbnail.rename(thumbnail_path)
-        return hash_hex
+        return filename_hash
         
     except Exception as e:
         print(f"Error processing {video_path}: {e}")
@@ -208,10 +192,6 @@ def scan_and_process(data_dir: Path, timestamp: float = 1.0, verbose: bool = Fal
                 except OSError:
                     skipped += 1
                     continue
-                
-                # Check if thumbnail already exists
-                # We need to extract and hash to check, so we'll do it anyway
-                # but we can optimize by checking if we've seen this video before
                 
                 hash_hex = process_video(video_file, data_dir, timestamp)
                 if hash_hex:
