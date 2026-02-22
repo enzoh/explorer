@@ -11,29 +11,6 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-def get_ffmpeg_path() -> str:
-    """Get the path to ffmpeg, checking local directory first, then system PATH."""
-    # Get the directory where this script is located
-    script_dir = Path(__file__).parent.resolve()
-    
-    # Check for ffmpeg in the explorer directory
-    # Try different platform-specific names
-    import platform
-    system = platform.system()
-    
-    if system == 'Windows':
-        local_ffmpeg = script_dir / 'ffmpeg.exe'
-    elif system == 'Darwin':  # macOS
-        local_ffmpeg = script_dir / 'ffmpeg'
-    else:  # Linux
-        local_ffmpeg = script_dir / 'ffmpeg'
-    
-    if local_ffmpeg.exists() and local_ffmpeg.is_file():
-        return str(local_ffmpeg)
-    
-    # Fall back to system ffmpeg
-    return 'ffmpeg'
-
 def extract_frame(video_path: Path, output_path: Path, timestamp: float = 1.0) -> bool:
     """
     Extract a frame from video at specified timestamp using ffmpeg.
@@ -47,8 +24,6 @@ def extract_frame(video_path: Path, output_path: Path, timestamp: float = 1.0) -
         True if successful, False otherwise
     """
     try:
-        ffmpeg_path = get_ffmpeg_path()
-        
         # Use ffmpeg to extract frame at 1 second
         # -ss: seek to timestamp
         # -i: input file
@@ -56,7 +31,7 @@ def extract_frame(video_path: Path, output_path: Path, timestamp: float = 1.0) -
         # -q:v 2: high quality JPEG
         # -y: overwrite output file
         cmd = [
-            ffmpeg_path,
+            'ffmpeg',
             '-ss', str(timestamp),
             '-i', str(video_path),
             '-vframes', '1',
@@ -289,10 +264,9 @@ def main():
         print(f"Error: Path is not a directory: {data_dir}")
         sys.exit(1)
     
-    # Check if ffmpeg is available (local or system)
-    ffmpeg_path = get_ffmpeg_path()
+    # Check if ffmpeg is available
     try:
-        subprocess.run([ffmpeg_path, '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        subprocess.run(['ffmpeg', '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
     except (subprocess.CalledProcessError, FileNotFoundError):
         print("Error: ffmpeg is not found")
         print("Please place ffmpeg binary in the explorer folder or install it system-wide")

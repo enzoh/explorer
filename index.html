@@ -195,98 +195,6 @@
             font-weight: bold;
         }
         
-        .video-grid {
-            flex: 1;
-            overflow-y: auto;
-            padding: 20px;
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 20px;
-            align-content: start;
-        }
-        
-        @media (max-width: 1600px) {
-            .video-grid {
-                grid-template-columns: repeat(3, 1fr);
-            }
-        }
-        
-        @media (max-width: 1200px) {
-            .video-grid {
-                grid-template-columns: repeat(2, 1fr);
-            }
-        }
-        
-        @media (max-width: 800px) {
-            .video-grid {
-                grid-template-columns: 1fr;
-            }
-        }
-        
-        .video-item {
-            position: relative;
-            background: #1a1a1a;
-            border-radius: 8px;
-            overflow: hidden;
-            box-shadow: 0 0 10px 10px rgba(0, 0, 0, 0.3);
-            cursor: pointer;
-            transition: transform 0.2s, box-shadow 0.2s;
-            display: flex;
-            flex-direction: column;
-            padding-bottom: 56.25%; /* 16:9 aspect ratio (9/16 = 0.5625) */
-        }
-        
-        .video-item:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 0 15px 15px rgba(0, 0, 0, 0.4);
-        }
-        
-        .video-item video,
-        .video-item img {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            object-fit: cover;
-            background: #000;
-            cursor: pointer;
-        }
-        
-        .video-item video:hover {
-            opacity: 0.9;
-        }
-        
-        .video-placeholder {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: #1a1a1a;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: #666;
-            font-size: 12px;
-        }
-        
-        
-        .video-name {
-            position: absolute;
-            bottom: 0;
-            left: 0;
-            right: 0;
-            padding: 10px;
-            font-size: 12px;
-            color: #ccc;
-            text-overflow: ellipsis;
-            overflow: hidden;
-            white-space: nowrap;
-            background: rgba(0, 0, 0, 0.7);
-            z-index: 10;
-        }
-        
         .loading {
             text-align: center;
             padding: 40px;
@@ -538,11 +446,10 @@
         const videoTimeline = document.getElementById('videoTimeline');
         
         let currentDataPath = '';
-        let currentDay = '';
-        let currentEventType = '';
         let charts = {}; // Store chart instances
         let allDays = []; // Store all available days (array of {date, hasEvents})
         let currentWeekOffset = 0; // Track which week we're viewing
+        let cachedDayData = {}; // Cache day data: {day: {hourlyStats, hourlyStatsByType, videosByHour}}
         
         // Load default data path from server on page load
         async function loadDefaultDataPath() {
@@ -803,28 +710,28 @@
             thumbnailGrid.innerHTML = '<div style="padding: 20px; color: #666; text-align: center;">Loading thumbnails...</div>';
             
             try {
-                // Get all videos for the day by fetching hourly stats and then videos for each hour
-                const response = await fetch(`/api/hourly-stats?path=${encodeURIComponent(currentDataPath)}&day=${encodeURIComponent(day)}`);
-                const statsData = await response.json();
+                // Use cached data if available, otherwise fetch
+                let dayData = cachedDayData[day];
+                if (!dayData) {
+                    const response = await fetch(`/api/day-data?path=${encodeURIComponent(currentDataPath)}&day=${encodeURIComponent(day)}`);
+                    dayData = await response.json();
+                    cachedDayData[day] = dayData; // Cache the data
+                }
                 
-                if (!statsData.hourlyStats || Object.keys(statsData.hourlyStats).length === 0) {
+                if (!dayData.hourlyStats || Object.keys(dayData.hourlyStats).length === 0) {
                     thumbnailGrid.innerHTML = '<div style="grid-column: 1 / -1; text-align: center; color: #666; padding: 20px;">No videos found for this day</div>';
                     return;
                 }
                 
                 // Collect all videos from all hours
                 const allVideos = [];
-                const hours = Object.keys(statsData.hourlyStats).map(h => parseInt(h)).sort((a, b) => a - b);
+                const hours = Object.keys(dayData.videosByHour || {}).map(h => parseInt(h)).sort((a, b) => a - b);
                 
                 for (const hour of hours) {
-                    try {
-                        const videoResponse = await fetch(`/api/videos-by-hour?path=${encodeURIComponent(currentDataPath)}&day=${encodeURIComponent(day)}&hour=${hour}`);
-                        const videoData = await videoResponse.json();
-                        if (videoData.videos && videoData.videos.length > 0) {
-                            allVideos.push(...videoData.videos);
-                        }
-                    } catch (err) {
-                        console.error(`Error loading videos for hour ${hour}:`, err);
+                    const hourStr = String(hour).padStart(2, '0');
+                    const videos = dayData.videosByHour[hourStr] || [];
+                    if (videos.length > 0) {
+                        allVideos.push(...videos);
                     }
                 }
                 
@@ -910,8 +817,13 @@
             charts = {};
             
             try {
-                const response = await fetch(`/api/hourly-stats?path=${encodeURIComponent(currentDataPath)}&day=${encodeURIComponent(day)}`);
-                const data = await response.json();
+                // Use cached data if available, otherwise fetch
+                let data = cachedDayData[day];
+                if (!data) {
+                    const response = await fetch(`/api/day-data?path=${encodeURIComponent(currentDataPath)}&day=${encodeURIComponent(day)}`);
+                    data = await response.json();
+                    cachedDayData[day] = data; // Cache the data
+                }
                 
                 if (!data.hourlyStats || Object.keys(data.hourlyStats).length === 0) {
                     graphsContainer.innerHTML = '<div class="empty-state">No event data found for this day</div>';
@@ -1042,13 +954,30 @@
             mainVideoPlayer.src = '';
             
             try {
-                const response = await fetch(`/api/videos-by-hour?path=${encodeURIComponent(currentDataPath)}&day=${encodeURIComponent(day)}&hour=${hour}`);
-                if (!response.ok) {
-                    throw new Error(`Server error: ${response.status} ${response.statusText}`);
+                // Use cached data if available, otherwise fetch
+                let dayData = cachedDayData[day];
+                if (!dayData) {
+                    const response = await fetch(`/api/day-data?path=${encodeURIComponent(currentDataPath)}&day=${encodeURIComponent(day)}`);
+                    if (!response.ok) {
+                        throw new Error(`Server error: ${response.status} ${response.statusText}`);
+                    }
+                    dayData = await response.json();
+                    cachedDayData[day] = dayData; // Cache the data
                 }
-                const data = await response.json();
                 
-                if (!data.videos || data.videos.length === 0) {
+                // Collect videos from hour-1, hour, and hour+1
+                const videos = [];
+                for (let targetHour = hour - 1; targetHour <= hour + 1; targetHour++) {
+                    if (targetHour < 0 || targetHour > 23) continue;
+                    const hourStr = String(targetHour).padStart(2, '0');
+                    const hourVideos = dayData.videosByHour[hourStr] || [];
+                    videos.push(...hourVideos);
+                }
+                
+                // Sort by timestamp (chronologically)
+                videos.sort((a, b) => a.timestamp - b.timestamp);
+                
+                if (videos.length === 0) {
                     videoTimeline.innerHTML = '<div style="padding: 20px; color: #666;">No videos found for this hour</div>';
                     return;
                 }
@@ -1058,7 +987,7 @@
                 // Find the index of the selected video if provided
                 let selectedIndex = 0;
                 if (selectedVideo) {
-                    const foundIndex = data.videos.findIndex(v => 
+                    const foundIndex = videos.findIndex(v => 
                         v.filename === selectedVideo.filename && 
                         v.eventType === selectedVideo.eventType &&
                         v.hour === selectedVideo.hour &&
@@ -1071,7 +1000,7 @@
                 }
                 
                 // Create timeline video items
-                data.videos.forEach((video, index) => {
+                videos.forEach((video, index) => {
                     const videoItem = document.createElement('div');
                     videoItem.className = 'timeline-video-item';
                     if (index === selectedIndex) {
@@ -1142,121 +1071,6 @@
             } catch (error) {
                 console.error('Error loading videos by hour:', error);
                 videoTimeline.innerHTML = '<div style="padding: 20px; color: #ff4444;">Error loading videos: ' + error.message + '</div>';
-            }
-        }
-        
-        async function loadGraphs() {
-            if (!currentDataPath) {
-                graphsContainer.innerHTML = '<div class="empty-state">No data path configured</div>';
-                return;
-            }
-            
-            // This function is no longer used - hourly graph is the only view
-            return;
-            
-            graphsContainer.innerHTML = '<div class="empty-state">Loading graphs...</div>';
-            
-            // Destroy existing charts
-            Object.values(charts).forEach(chart => chart.destroy());
-            charts = {};
-            
-            try {
-                const response = await fetch(`/api/event-stats?path=${encodeURIComponent(currentDataPath)}&period=${encodeURIComponent(period)}`);
-                const data = await response.json();
-                
-                if (!data.stats || Object.keys(data.stats).length === 0) {
-                    graphsContainer.innerHTML = '<div class="empty-state">No event data found</div>';
-                    return;
-                }
-                
-                graphsContainer.innerHTML = '';
-                
-                // Create a chart for each event type (only if it has data)
-                Object.entries(data.stats).forEach(([eventType, stats]) => {
-                    // Skip if no data points
-                    if (!stats || Object.keys(stats).length === 0) {
-                        return;
-                    }
-                    
-                    // Prepare data
-                    const labels = Object.keys(stats).sort();
-                    const values = labels.map(label => stats[label]);
-                    
-                    // Skip if all values are zero
-                    if (values.every(v => v === 0)) {
-                        return;
-                    }
-                    
-                    const graphCard = document.createElement('div');
-                    graphCard.className = 'graph-card';
-                    
-                    const title = document.createElement('div');
-                    title.className = 'graph-title';
-                    title.textContent = eventType.replace(/-/g, ' ');
-                    
-                    const canvasContainer = document.createElement('div');
-                    canvasContainer.className = 'graph-canvas-container';
-                    
-                    const canvas = document.createElement('canvas');
-                    canvas.id = `chart-${eventType}`;
-                    
-                    canvasContainer.appendChild(canvas);
-                    graphCard.appendChild(title);
-                    graphCard.appendChild(canvasContainer);
-                    graphsContainer.appendChild(graphCard);
-                    
-                    // Create chart
-                    const ctx = canvas.getContext('2d');
-                    charts[eventType] = new Chart(ctx, {
-                        type: 'line',
-                        data: {
-                            labels: labels,
-                            datasets: [{
-                                label: 'Event Count',
-                                data: values,
-                                borderColor: '#f0f0f0',
-                                backgroundColor: 'rgba(240, 240, 240, 0.1)',
-                                tension: 0.4,
-                                fill: true
-                            }]
-                        },
-                        options: {
-                            responsive: true,
-                            maintainAspectRatio: false,
-                            plugins: {
-                                legend: {
-                                    labels: {
-                                        color: '#f0f0f0'
-                                    }
-                                }
-                            },
-                            scales: {
-                                x: {
-                                    ticks: {
-                                        color: '#aaa',
-                                        maxRotation: 45,
-                                        minRotation: 45
-                                    },
-                                    grid: {
-                                        color: '#333'
-                                    }
-                                },
-                                y: {
-                                    ticks: {
-                                        color: '#aaa'
-                                    },
-                                    grid: {
-                                        color: '#333'
-                                    },
-                                    beginAtZero: true
-                                }
-                            }
-                        }
-                    });
-                });
-            } catch (error) {
-                console.error('Error loading graphs:', error);
-                graphsContainer.innerHTML = '<div class="empty-state">Error loading graphs: ' + error.message + '</div>';
             }
         }
         
