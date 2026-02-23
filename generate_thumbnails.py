@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+
 def extract_frame(video_path: Path, output_path: Path, timestamp: float = 1.0) -> bool:
     """
     Extract a frame from video at specified timestamp using ffmpeg.
@@ -23,12 +24,6 @@ def extract_frame(video_path: Path, output_path: Path, timestamp: float = 1.0) -
         True if successful, False otherwise
     """
     try:
-        # Use ffmpeg to extract frame at 1 second
-        # -ss: seek to timestamp
-        # -i: input file
-        # -vframes 1: extract only 1 frame
-        # -q:v 2: high quality JPEG
-        # -y: overwrite output file
         cmd = [
             'ffmpeg',
             '-ss', str(timestamp),
@@ -53,6 +48,7 @@ def extract_frame(video_path: Path, output_path: Path, timestamp: float = 1.0) -
     except Exception as e:
         print(f"Error extracting frame from {video_path}: {e}")
         return False
+
 
 def get_thumbnail_path(data_dir: Path, hash_hex: str, file_limit: int = 1000) -> Path:
     """
@@ -81,7 +77,10 @@ def get_thumbnail_path(data_dir: Path, hash_hex: str, file_limit: int = 1000) ->
     # Recursively check and split directories based on file count
     while hash_index < hash_length - 2:  # Need at least 2 chars for next level
         # Count files (not directories) in current directory
-        file_count = sum(1 for item in current_dir.iterdir() if item.is_file())
+        try:
+            file_count = sum(1 for item in current_dir.iterdir() if item.is_file())
+        except (OSError, FileNotFoundError):
+            file_count = 0
         
         # If under limit, store here
         if file_count < file_limit:
@@ -96,9 +95,10 @@ def get_thumbnail_path(data_dir: Path, hash_hex: str, file_limit: int = 1000) ->
     # Fallback: if we've exhausted hash characters, store in deepest directory
     return current_dir / f"{hash_hex}.jpg"
 
-def process_video(video_path: Path, data_dir: Path, timestamp: float = 1.0) -> Optional[str]:
+def generate_thumbnail_for_video(video_path: Path, data_dir: Path, timestamp: float = 1.0) -> Optional[str]:
     """
-    Process a single video file to generate and store thumbnail.
+    Generate thumbnail for a video file.
+    Returns the hash based on filename, or None if generation failed.
     
     Uses filename-based hashing for simpler lookup - filename is sufficient to identify the video.
     
@@ -193,7 +193,7 @@ def scan_and_process(data_dir: Path, timestamp: float = 1.0, verbose: bool = Fal
                     skipped += 1
                     continue
                 
-                hash_hex = process_video(video_file, data_dir, timestamp)
+                hash_hex = generate_thumbnail_for_video(video_file, data_dir, timestamp)
                 if hash_hex:
                     processed += 1
                     if verbose:

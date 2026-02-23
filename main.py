@@ -6,13 +6,232 @@ import urllib.parse
 import json
 import os
 import argparse
-import subprocess
-import hashlib
 from pathlib import Path
 from datetime import datetime, timedelta
 
+
+class PathResolver:
+    """Utility class for resolving data paths."""
+    
+    @staticmethod
+    def resolve_data_path(data_path):
+        """Resolve data path relative to the workspace root."""
+        # Get the workspace root (parent of explorer directory)
+        workspace_root = Path(__file__).parent.parent
+        explorer_dir = Path(__file__).parent
+        
+        # Normalize the path - handle both relative and absolute paths
+        if data_path.startswith('/'):
+            # Absolute path
+            full_path = Path(data_path)
+        elif data_path.startswith('../'):
+            # Path is relative to explorer directory (e.g., ../SOVEREIGN/data)
+            # Resolve from explorer directory
+            full_path = (explorer_dir / data_path).resolve()
+        else:
+            # Relative path from workspace root
+            full_path = (workspace_root / data_path).resolve()
+        return full_path
+
+
+class ThumbnailService:
+    """Service for thumbnail operations."""
+    
+    @staticmethod
+    def extract_frame(video_path: Path, output_path: Path, timestamp: float = 1.0) -> bool:
+        """Extract a frame from video at specified timestamp using ffmpeg."""
+        from generate_thumbnails import extract_frame as extract_frame_util
+        return extract_frame_util(video_path, output_path, timestamp)
+    
+    @staticmethod
+    def get_thumbnail_path(data_dir: Path, hash_hex: str, file_limit: int = 1000) -> Path:
+        """Get the thumbnail path with recursive directory structure."""
+        from generate_thumbnails import get_thumbnail_path as get_thumbnail_path_util
+        return get_thumbnail_path_util(data_dir, hash_hex, file_limit)
+    
+    @staticmethod
+    def find_thumbnail_path(data_dir: Path, hash_hex: str) -> Path:
+        """Find existing thumbnail path by checking the expected location."""
+        thumbnail_path = ThumbnailService.get_thumbnail_path(data_dir, hash_hex)
+        return thumbnail_path if thumbnail_path.exists() else None
+    
+    @staticmethod
+    def generate_thumbnail_for_video(video_path: Path, data_dir: Path, timestamp: float = 1.0) -> str:
+        """Generate thumbnail for a video file."""
+        from generate_thumbnails import generate_thumbnail_for_video as generate_thumbnail_util
+        return generate_thumbnail_util(video_path, data_dir, timestamp)
+
+
+class DataService:
+    """Service for data operations (days, videos, etc.)."""
+    
+    def __init__(self, path_resolver: PathResolver, thumbnail_service: ThumbnailService):
+        self.path_resolver = path_resolver
+        self.thumbnail_service = thumbnail_service
+    
+    def list_days(self, data_path: str):
+        """List all days in the data directory."""
+        full_path = self.path_resolver.resolve_data_path(data_path)
+        
+        if not full_path.exists() or not full_path.is_dir():
+            raise FileNotFoundError(f"Data directory not found: {full_path}")
+        
+        # List all directories (days with events)
+        days_with_events = set()
+        for item in sorted(full_path.iterdir()):
+            if item.is_dir() and not item.name.startswith('.'):
+                days_with_events.add(item.name)
+        
+        # Generate all dates from first day to last day (inclusive)
+        all_days = []
+        if days_with_events:
+            # Parse first and last day
+            sorted_days = sorted(days_with_events)
+            first_day_str = sorted_days[0]
+            last_day_str = sorted_days[-1]
+            
+            try:
+                first_date = datetime.strptime(first_day_str, '%Y-%m-%d')
+                last_date = datetime.strptime(last_day_str, '%Y-%m-%d')
+                
+                # Generate all dates in range (inclusive)
+                current_date = first_date
+                while current_date <= last_date:
+                    date_str = current_date.strftime('%Y-%m-%d')
+                    all_days.append({
+                        'date': date_str,
+                        'hasEvents': date_str in days_with_events
+                    })
+                    current_date += timedelta(days=1)
+                
+            except ValueError:
+                # If date parsing fails, fall back to just days with events
+                all_days = [{'date': day, 'hasEvents': True} for day in sorted_days]
+        else:
+            # No days with events, return empty list
+            all_days = []
+        
+        return {'days': all_days}
+    
+    def get_day_data(self, data_path: str, day: str):
+        """Get hourly stats and videos for a day."""
+        base_path = self.path_resolver.resolve_data_path(data_path)
+        day_path = base_path / day
+        
+        if not day_path.exists() or not day_path.is_dir():
+            raise FileNotFoundError(f"Day directory not found: {day_path}")
+        
+        # Initialize hourly counts (0-23 hours) and event type breakdown
+        hourly_counts = {str(i).zfill(2): 0 for i in range(24)}
+        hourly_by_event_type = {str(i).zfill(2): {} for i in range(24)}
+        videos_by_hour = {str(i).zfill(2): [] for i in range(24)}
+        
+        # File extensions
+        VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
+        IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif'}
+        
+        # Get all event type directories (excluding test)
+        for event_dir in day_path.iterdir():
+            if event_dir.is_dir() and not event_dir.name.startswith('.') and event_dir.name.lower() != 'test':
+                event_type = event_dir.name
+                
+                for file_item in event_dir.iterdir():
+                    if file_item.is_file():
+                        if 'deadbeef' in file_item.name.lower():
+                            continue
+                        if (file_item.suffix.lower() in VIDEO_EXTENSIONS or 
+                            file_item.suffix.lower() in IMAGE_EXTENSIONS):
+                            try:
+                                if file_item.stat().st_size > 0:
+                                    # Extract hour from filename (format: HH-MM-SS-...)
+                                    parts = file_item.name.split('-')
+                                    if len(parts) >= 3:
+                                        try:
+                                            file_hour = int(parts[0])
+                                            if 0 <= file_hour <= 23:
+                                                hour_str = str(file_hour).zfill(2)
+                                                
+                                                # Update hourly counts
+                                                hourly_counts[hour_str] += 1
+                                                
+                                                # Track by event type
+                                                if event_type not in hourly_by_event_type[hour_str]:
+                                                    hourly_by_event_type[hour_str][event_type] = 0
+                                                hourly_by_event_type[hour_str][event_type] += 1
+                                                
+                                                # Extract full timestamp for video entry
+                                                try:
+                                                    minutes = int(parts[1])
+                                                    seconds = int(parts[2].split('-')[0])
+                                                    timestamp = file_hour * 3600 + minutes * 60 + seconds
+                                                    
+                                                    # Generate thumbnail hash for this video (only for video files, not images)
+                                                    video_hash = None
+                                                    if file_item.suffix.lower() in VIDEO_EXTENSIONS:
+                                                        try:
+                                                            video_hash = self.thumbnail_service.generate_thumbnail_for_video(file_item, base_path)
+                                                        except Exception as e:
+                                                            # Log error but continue - thumbnail will be generated on-demand
+                                                            print(f"Warning: Failed to generate thumbnail for {file_item.name}: {e}")
+                                                            pass
+                                                    
+                                                    videos_by_hour[hour_str].append({
+                                                        'filename': file_item.name,
+                                                        'eventType': event_type,
+                                                        'hour': file_hour,
+                                                        'minutes': minutes,
+                                                        'seconds': seconds,
+                                                        'timestamp': timestamp,
+                                                        'thumbnailHash': video_hash
+                                                    })
+                                                except (ValueError, IndexError):
+                                                    pass
+                                        except ValueError:
+                                            pass
+                            except OSError:
+                                pass
+        
+        # Sort videos by timestamp within each hour
+        for hour_str in videos_by_hour:
+            videos_by_hour[hour_str].sort(key=lambda x: x['timestamp'])
+        
+        # Convert to sorted format for charting
+        result = dict(sorted(hourly_counts.items()))
+        result_by_type = {k: dict(sorted(v.items())) for k, v in sorted(hourly_by_event_type.items())}
+        videos_by_hour_sorted = {k: videos_by_hour[k] for k in sorted(videos_by_hour.keys())}
+        
+        return {
+            'hourlyStats': result, 
+            'hourlyStatsByType': result_by_type,
+            'videosByHour': videos_by_hour_sorted,
+            'day': day
+        }
+
+
 class ExplorerHandler(http.server.SimpleHTTPRequestHandler):
+    """HTTP request handler for the explorer server."""
     default_data_path = None
+    
+    @property
+    def path_resolver(self):
+        """Lazy initialization of path resolver."""
+        if not hasattr(self, '_path_resolver'):
+            self._path_resolver = PathResolver()
+        return self._path_resolver
+    
+    @property
+    def thumbnail_service(self):
+        """Lazy initialization of thumbnail service."""
+        if not hasattr(self, '_thumbnail_service'):
+            self._thumbnail_service = ThumbnailService()
+        return self._thumbnail_service
+    
+    @property
+    def data_service(self):
+        """Lazy initialization of data service."""
+        if not hasattr(self, '_data_service'):
+            self._data_service = DataService(self.path_resolver, self.thumbnail_service)
+        return self._data_service
     
     def log_message(self, format, *args):
         # Log API requests for debugging
@@ -37,7 +256,15 @@ class ExplorerHandler(http.server.SimpleHTTPRequestHandler):
         else:
             super().send_error(code, message)
     
+    def send_json_response(self, data):
+        """Send a JSON response."""
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode('utf-8'))
+    
     def do_GET(self):
+        """Handle GET requests and route to appropriate handlers."""
         parsed_path = urllib.parse.urlparse(self.path)
         query_params = urllib.parse.parse_qs(parsed_path.query)
         
@@ -64,79 +291,26 @@ class ExplorerHandler(http.server.SimpleHTTPRequestHandler):
             # Serve static files normally
             super().do_GET()
     
-    def resolve_data_path(self, data_path):
-        """Resolve data path relative to the workspace root."""
-        # Get the workspace root (parent of explorer directory)
-        workspace_root = Path(__file__).parent.parent
-        explorer_dir = Path(__file__).parent
-        
-        # Normalize the path - handle both relative and absolute paths
-        if data_path.startswith('/'):
-            # Absolute path
-            full_path = Path(data_path)
-        elif data_path.startswith('../'):
-            # Path is relative to explorer directory (e.g., ../SOVEREIGN/data)
-            # Resolve from explorer directory
-            full_path = (explorer_dir / data_path).resolve()
-        else:
-            # Relative path from workspace root
-            full_path = (workspace_root / data_path).resolve()
-        return full_path
-    
     def handle_list_days(self, query_params):
+        """Handle /api/list-days endpoint."""
         try:
             data_path = query_params.get('path', [''])[0]
             if not data_path:
                 self.send_error(400, "Missing path parameter")
                 return
             
-            # Resolve path relative to workspace root
-            full_path = self.resolve_data_path(data_path)
-            
-            if not full_path.exists() or not full_path.is_dir():
-                self.send_error(404, f"Data directory not found: {full_path}")
-                return
-            
-            # List all directories (days with events)
-            days_with_events = set()
-            for item in sorted(full_path.iterdir()):
-                if item.is_dir() and not item.name.startswith('.'):
-                    days_with_events.add(item.name)
-            
-            # Generate all dates from first day to last day (inclusive)
-            all_days = []
-            if days_with_events:
-                # Parse first and last day
-                sorted_days = sorted(days_with_events)
-                first_day_str = sorted_days[0]
-                last_day_str = sorted_days[-1]
-                
-                try:
-                    first_date = datetime.strptime(first_day_str, '%Y-%m-%d')
-                    last_date = datetime.strptime(last_day_str, '%Y-%m-%d')
-                    
-                    # Generate all dates in range (inclusive)
-                    current_date = first_date
-                    while current_date <= last_date:
-                        date_str = current_date.strftime('%Y-%m-%d')
-                        all_days.append({
-                            'date': date_str,
-                            'hasEvents': date_str in days_with_events
-                        })
-                        current_date += timedelta(days=1)
-                    
-                except ValueError:
-                    # If date parsing fails, fall back to just days with events
-                    all_days = [{'date': day, 'hasEvents': True} for day in sorted_days]
-            else:
-                # No days with events, return empty list
-                all_days = []
-            
-            self.send_json_response({'days': all_days})
+            result = self.data_service.list_days(data_path)
+            self.send_json_response(result)
+        except FileNotFoundError as e:
+            self.send_error(404, str(e))
         except Exception as e:
+            import traceback
+            error_msg = f"Error listing days: {str(e)}\n{traceback.format_exc()}"
+            print(error_msg)  # Log full error for debugging
             self.send_error(500, f"Error listing days: {str(e)}")
     
     def handle_serve_video(self, query_params):
+        """Handle /api/video endpoint."""
         try:
             data_path = query_params.get('path', [''])[0]
             day = query_params.get('day', [''])[0]
@@ -148,7 +322,7 @@ class ExplorerHandler(http.server.SimpleHTTPRequestHandler):
                 return
             
             # Resolve path relative to workspace root
-            base_path = self.resolve_data_path(data_path)
+            base_path = self.path_resolver.resolve_data_path(data_path)
             file_path = base_path / day / event_type / filename
             
             # Security check: ensure file is within the data directory
@@ -218,7 +392,7 @@ class ExplorerHandler(http.server.SimpleHTTPRequestHandler):
             self.send_error(500, f"Error serving video: {str(e)}")
     
     def handle_day_data(self, query_params):
-        """Combined handler that returns hourly stats and all videos for a day."""
+        """Handle /api/day-data endpoint."""
         try:
             data_path = query_params.get('path', [''])[0]
             day = query_params.get('day', [''])[0]
@@ -227,243 +401,15 @@ class ExplorerHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(400, "Missing path or day parameter")
                 return
             
-            # Resolve path relative to workspace root
-            base_path = self.resolve_data_path(data_path)
-            day_path = base_path / day
-            
-            if not day_path.exists() or not day_path.is_dir():
-                self.send_error(404, f"Day directory not found: {day_path}")
-                return
-            
-            # Initialize hourly counts (0-23 hours) and event type breakdown
-            hourly_counts = {str(i).zfill(2): 0 for i in range(24)}
-            hourly_by_event_type = {str(i).zfill(2): {} for i in range(24)}
-            videos_by_hour = {str(i).zfill(2): [] for i in range(24)}
-            
-            # File extensions
-            VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
-            IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif'}
-            
-            # Get all event type directories (excluding test)
-            for event_dir in day_path.iterdir():
-                if event_dir.is_dir() and not event_dir.name.startswith('.') and event_dir.name.lower() != 'test':
-                    event_type = event_dir.name
-                    
-                    for file_item in event_dir.iterdir():
-                        if file_item.is_file():
-                            if 'deadbeef' in file_item.name.lower():
-                                continue
-                            if (file_item.suffix.lower() in VIDEO_EXTENSIONS or 
-                                file_item.suffix.lower() in IMAGE_EXTENSIONS):
-                                try:
-                                    if file_item.stat().st_size > 0:
-                                        # Extract hour from filename (format: HH-MM-SS-...)
-                                        parts = file_item.name.split('-')
-                                        if len(parts) >= 3:
-                                            try:
-                                                file_hour = int(parts[0])
-                                                if 0 <= file_hour <= 23:
-                                                    hour_str = str(file_hour).zfill(2)
-                                                    
-                                                    # Update hourly counts
-                                                    hourly_counts[hour_str] += 1
-                                                    
-                                                    # Track by event type
-                                                    if event_type not in hourly_by_event_type[hour_str]:
-                                                        hourly_by_event_type[hour_str][event_type] = 0
-                                                    hourly_by_event_type[hour_str][event_type] += 1
-                                                    
-                                                    # Extract full timestamp for video entry
-                                                    try:
-                                                        minutes = int(parts[1])
-                                                        seconds = int(parts[2].split('-')[0])
-                                                        timestamp = file_hour * 3600 + minutes * 60 + seconds
-                                                        
-                                                        # Generate thumbnail hash for this video (only for video files, not images)
-                                                        video_hash = None
-                                                        if file_item.suffix.lower() in VIDEO_EXTENSIONS:
-                                                            try:
-                                                                video_hash = self.generate_thumbnail_for_video(file_item, base_path)
-                                                            except Exception as e:
-                                                                # Log error but continue - thumbnail will be generated on-demand
-                                                                print(f"Warning: Failed to generate thumbnail for {file_item.name}: {e}")
-                                                                pass
-                                                        
-                                                        videos_by_hour[hour_str].append({
-                                                            'filename': file_item.name,
-                                                            'eventType': event_type,
-                                                            'hour': file_hour,
-                                                            'minutes': minutes,
-                                                            'seconds': seconds,
-                                                            'timestamp': timestamp,
-                                                            'thumbnailHash': video_hash
-                                                        })
-                                                    except (ValueError, IndexError):
-                                                        pass
-                                            except ValueError:
-                                                pass
-                                except OSError:
-                                    pass
-            
-            # Sort videos by timestamp within each hour
-            for hour_str in videos_by_hour:
-                videos_by_hour[hour_str].sort(key=lambda x: x['timestamp'])
-            
-            # Convert to sorted format for charting
-            result = dict(sorted(hourly_counts.items()))
-            result_by_type = {k: dict(sorted(v.items())) for k, v in sorted(hourly_by_event_type.items())}
-            videos_by_hour_sorted = {k: videos_by_hour[k] for k in sorted(videos_by_hour.keys())}
-            
-            self.send_json_response({
-                'hourlyStats': result, 
-                'hourlyStatsByType': result_by_type,
-                'videosByHour': videos_by_hour_sorted,
-                'day': day
-            })
+            result = self.data_service.get_day_data(data_path, day)
+            self.send_json_response(result)
+        except FileNotFoundError as e:
+            self.send_error(404, str(e))
         except Exception as e:
             self.send_error(500, f"Error getting day data: {str(e)}")
     
-    def extract_frame(self, video_path: Path, output_path: Path, timestamp: float = 1.0) -> bool:
-        """Extract a frame from video at specified timestamp using ffmpeg."""
-        try:
-            cmd = [
-                'ffmpeg',
-                '-ss', str(timestamp),
-                '-i', str(video_path),
-                '-vframes', '1',
-                '-q:v', '2',
-                '-y',
-                str(output_path)
-            ]
-            
-            result = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=30
-            )
-            
-            if result.returncode != 0:
-                # Log ffmpeg error for debugging
-                stderr_output = result.stderr.decode('utf-8', errors='ignore')
-                print(f"ffmpeg error for {video_path.name}: {stderr_output[:200]}")
-                return False
-            
-            return output_path.exists()
-        except FileNotFoundError:
-            print("Error: ffmpeg not found. Please place ffmpeg binary in the explorer folder or install it system-wide.")
-            return False
-        except subprocess.TimeoutExpired:
-            print(f"Timeout extracting frame from {video_path.name}")
-            return False
-        except Exception as e:
-            print(f"Error extracting frame from {video_path.name}: {e}")
-            return False
-    
-    def find_thumbnail_path(self, data_dir: Path, hash_hex: str) -> Path:
-        """
-        Find existing thumbnail path by checking the expected location.
-        Uses get_thumbnail_path to determine where it should be, then checks if it exists.
-        
-        Args:
-            data_dir: Base data directory
-            hash_hex: SHA256 hash in hexadecimal
-        
-        Returns:
-            Path object if found, None otherwise
-        """
-        thumbnail_path = self.get_thumbnail_path(data_dir, hash_hex)
-        return thumbnail_path if thumbnail_path.exists() else None
-    
-    def get_thumbnail_path(self, data_dir: Path, hash_hex: str, file_limit: int = 1000) -> Path:
-        """
-        Get the thumbnail path with recursive directory structure.
-        Starts flat, then splits into subdirectories based on hash when file limit is reached.
-        
-        Args:
-            data_dir: Base data directory
-            hash_hex: SHA256 hash in hexadecimal
-            file_limit: Maximum number of files per directory before splitting
-        
-        Returns:
-            Path object for the thumbnail
-        """
-        thumbnails_base = data_dir / '.thumbnails'
-        thumbnails_base.mkdir(parents=True, exist_ok=True)
-        
-        # Start with flat structure
-        current_dir = thumbnails_base
-        hash_index = 0
-        hash_length = len(hash_hex)
-        
-        # Recursively check and split directories based on file count
-        while hash_index < hash_length - 2:  # Need at least 2 chars for next level
-            # Count files (not directories) in current directory
-            try:
-                file_count = sum(1 for item in current_dir.iterdir() if item.is_file())
-            except (OSError, FileNotFoundError):
-                file_count = 0
-            
-            # If under limit, store here
-            if file_count < file_limit:
-                return current_dir / f"{hash_hex}.jpg"
-            
-            # Over limit, need to split - use next 2 characters of hash
-            next_chars = hash_hex[hash_index:hash_index + 2].upper()
-            current_dir = current_dir / next_chars
-            current_dir.mkdir(parents=True, exist_ok=True)
-            hash_index += 2
-        
-        # Fallback: if we've exhausted hash characters, store in deepest directory
-        return current_dir / f"{hash_hex}.jpg"
-    
-    def generate_thumbnail_for_video(self, video_path: Path, data_dir: Path, timestamp: float = 1.0) -> str:
-        """
-        Generate thumbnail for a video file.
-        Returns the hash based on filename, or None if generation failed.
-        
-        Uses filename hash for simpler lookup - filename is sufficient to identify the video.
-        """
-        # Hash the filename to create a unique identifier
-        filename_hash = hashlib.sha256(video_path.name.encode('utf-8')).hexdigest()
-        
-        # Check if thumbnail already exists
-        thumbnail_path = self.get_thumbnail_path(data_dir, filename_hash)
-        if thumbnail_path.exists():
-            return filename_hash
-        
-        # Thumbnail doesn't exist - extract frame and generate it
-        import tempfile
-        
-        # Create temporary directory for extraction
-        temp_dir = Path(tempfile.gettempdir())
-        temp_thumbnail = temp_dir / f"temp_thumb_{video_path.stem}.jpg"
-        
-        try:
-            # Extract frame
-            if not self.extract_frame(video_path, temp_thumbnail, timestamp):
-                return None
-            
-            # Get destination path for new thumbnail (uses recursive structure based on file count)
-            thumbnail_path = self.get_thumbnail_path(data_dir, filename_hash)
-            
-            # Thumbnail doesn't exist, create directory and save it
-            thumbnail_path.parent.mkdir(parents=True, exist_ok=True)
-            temp_thumbnail.rename(thumbnail_path)
-            
-            return filename_hash
-            
-        except Exception as e:
-            # Clean up temp file on error
-            if temp_thumbnail.exists():
-                try:
-                    temp_thumbnail.unlink()
-                except OSError:
-                    pass
-            return None
-    
     def handle_serve_thumbnail(self, query_params):
-        """Serve a thumbnail image by hash, generating it on-demand if needed."""
+        """Handle /api/thumbnail endpoint."""
         try:
             data_path = query_params.get('path', [''])[0]
             hash_hex = query_params.get('hash', [''])[0]
@@ -473,7 +419,7 @@ class ExplorerHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(400, "Missing path parameter")
                 return
             
-            base_path = self.resolve_data_path(data_path)
+            base_path = self.path_resolver.resolve_data_path(data_path)
             
             # If hash is provided, try to serve existing thumbnail
             if hash_hex:
@@ -483,7 +429,7 @@ class ExplorerHandler(http.server.SimpleHTTPRequestHandler):
                     return
                 
                 # Try to find existing thumbnail
-                thumbnail_path = self.get_thumbnail_path(base_path, hash_hex)
+                thumbnail_path = self.thumbnail_service.get_thumbnail_path(base_path, hash_hex)
                 
                 if thumbnail_path.exists() and thumbnail_path.is_file():
                     # Security check
@@ -516,10 +462,10 @@ class ExplorerHandler(http.server.SimpleHTTPRequestHandler):
                         VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
                         if video_path.suffix.lower() in VIDEO_EXTENSIONS:
                             # Generate thumbnail
-                            hash_hex = self.generate_thumbnail_for_video(video_path, base_path)
+                            hash_hex = self.thumbnail_service.generate_thumbnail_for_video(video_path, base_path)
                             if hash_hex:
                                 # Serve the newly generated thumbnail
-                                thumbnail_path = self.get_thumbnail_path(base_path, hash_hex)
+                                thumbnail_path = self.thumbnail_service.get_thumbnail_path(base_path, hash_hex)
                                 if thumbnail_path.exists():
                                     self.send_response(200)
                                     self.send_header('Content-Type', 'image/jpeg')
@@ -547,12 +493,6 @@ class ExplorerHandler(http.server.SimpleHTTPRequestHandler):
                 
         except Exception as e:
             self.send_error(500, f"Error serving thumbnail: {str(e)}")
-    
-    def send_json_response(self, data):
-        self.send_response(200)
-        self.send_header('Content-Type', 'application/json')
-        self.end_headers()
-        self.wfile.write(json.dumps(data).encode('utf-8'))
 
 
 def run_server(port=8080, data_path=None):
