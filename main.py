@@ -9,51 +9,61 @@ import argparse
 from pathlib import Path
 from datetime import datetime, timedelta
 
+# Only support the formats actually used by the system.
+VIDEO_EXTENSIONS = {'.mp4'}
+IMAGE_EXTENSIONS = {'.jpg'}
+
+CONTENT_TYPE_MAP = {
+    '.mp4': 'video/mp4',
+    '.jpg': 'image/jpeg',
+}
+
 
 class PathResolver:
-    """Utility class for resolving data paths."""
-    
-    @staticmethod
-    def resolve_data_path(data_path):
-        """Resolve data path relative to the workspace root."""
-        # Get the workspace root (parent of explorer directory)
-        workspace_root = Path(__file__).parent.parent
+    """Utility class for resolving and validating file system paths."""
+
+    # Set once at startup; all path requests are validated against this.
+    _configured_data_path: Path = None
+
+    @classmethod
+    def set_configured_path(cls, data_path: str):
+        """Resolve and store the single allowed data root at startup."""
         explorer_dir = Path(__file__).parent
-        
-        # Normalize the path - handle both relative and absolute paths
-        if data_path.startswith('/'):
-            # Absolute path
-            full_path = Path(data_path)
-        elif data_path.startswith('../'):
-            # Path is relative to explorer directory (e.g., ../SOVEREIGN/data)
-            # Resolve from explorer directory
-            full_path = (explorer_dir / data_path).resolve()
+        raw = Path(data_path)
+        if raw.is_absolute():
+            resolved = raw.resolve()
         else:
-            # Relative path from workspace root
-            full_path = (workspace_root / data_path).resolve()
-        return full_path
+            resolved = (explorer_dir / raw).resolve()
+        cls._configured_data_path = resolved
+
+    @classmethod
+    def is_path_within_directory(path: Path, base: Path) -> bool:
+        """Return True only if *path* is base itself or a descendant of base."""
+        try:
+            path.resolve().relative_to(base.resolve())
+            return True
+        except ValueError:
+            return False
+
+    @staticmethod
+    def safe_path_component(component: str) -> bool:
+        """Return True if a single path component contains no traversal or separators."""
+        return (
+            bool(component)
+            and '..' not in component
+            and '/' not in component
+            and '\\' not in component
+        )
 
 
 class ThumbnailService:
     """Service for thumbnail operations."""
     
     @staticmethod
-    def extract_frame(video_path: Path, output_path: Path, timestamp: float = 1.0) -> bool:
-        """Extract a frame from video at specified timestamp using ffmpeg."""
-        from generate_thumbnails import extract_frame as extract_frame_util
-        return extract_frame_util(video_path, output_path, timestamp)
-    
-    @staticmethod
     def get_thumbnail_path(data_dir: Path, hash_hex: str, file_limit: int = 1000) -> Path:
         """Get the thumbnail path with recursive directory structure."""
         from generate_thumbnails import get_thumbnail_path as get_thumbnail_path_util
         return get_thumbnail_path_util(data_dir, hash_hex, file_limit)
-    
-    @staticmethod
-    def find_thumbnail_path(data_dir: Path, hash_hex: str) -> Path:
-        """Find existing thumbnail path by checking the expected location."""
-        thumbnail_path = ThumbnailService.get_thumbnail_path(data_dir, hash_hex)
-        return thumbnail_path if thumbnail_path.exists() else None
     
     @staticmethod
     def generate_thumbnail_for_video(video_path: Path, data_dir: Path, timestamp: float = 1.0) -> str:
@@ -65,13 +75,12 @@ class ThumbnailService:
 class DataService:
     """Service for data operations (days, videos, etc.)."""
     
-    def __init__(self, path_resolver: PathResolver, thumbnail_service: ThumbnailService):
-        self.path_resolver = path_resolver
+    def __init__(self, thumbnail_service: ThumbnailService):
         self.thumbnail_service = thumbnail_service
     
-    def list_days(self, data_path: str):
-        """List all days in the data directory."""
-        full_path = self.path_resolver.resolve_data_path(data_path)
+    def list_days(self):
+        """List all days in the configured data directory."""
+        full_path = PathResolver._configured_data_path
         
         if not full_path.exists() or not full_path.is_dir():
             raise FileNotFoundError(f"Data directory not found: {full_path}")
@@ -113,9 +122,9 @@ class DataService:
         
         return {'days': all_days}
     
-    def get_day_data(self, data_path: str, day: str):
+    def get_day_data(self, day: str):
         """Get hourly stats and videos for a day."""
-        base_path = self.path_resolver.resolve_data_path(data_path)
+        base_path = PathResolver._configured_data_path
         day_path = base_path / day
         
         if not day_path.exists() or not day_path.is_dir():
@@ -125,11 +134,7 @@ class DataService:
         hourly_counts = {str(i).zfill(2): 0 for i in range(24)}
         hourly_by_event_type = {str(i).zfill(2): {} for i in range(24)}
         videos_by_hour = {str(i).zfill(2): [] for i in range(24)}
-        
-        # File extensions
-        VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
-        IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif'}
-        
+
         # Get all event type directories (excluding test)
         for event_dir in day_path.iterdir():
             if event_dir.is_dir() and not event_dir.name.startswith('.') and event_dir.name.lower() != 'test':
@@ -159,33 +164,22 @@ class DataService:
                                                     hourly_by_event_type[hour_str][event_type] = 0
                                                 hourly_by_event_type[hour_str][event_type] += 1
                                                 
-                                                # Extract full timestamp for video entry
-                                                try:
-                                                    minutes = int(parts[1])
-                                                    seconds = int(parts[2].split('-')[0])
-                                                    timestamp = file_hour * 3600 + minutes * 60 + seconds
-                                                    
-                                                    # Generate thumbnail hash for this video (only for video files, not images)
-                                                    video_hash = None
-                                                    if file_item.suffix.lower() in VIDEO_EXTENSIONS:
-                                                        try:
-                                                            video_hash = self.thumbnail_service.generate_thumbnail_for_video(file_item, base_path)
-                                                        except Exception as e:
-                                                            # Log error but continue - thumbnail will be generated on-demand
-                                                            print(f"Warning: Failed to generate thumbnail for {file_item.name}: {e}")
-                                                            pass
-                                                    
-                                                    videos_by_hour[hour_str].append({
-                                                        'filename': file_item.name,
-                                                        'eventType': event_type,
-                                                        'hour': file_hour,
-                                                        'minutes': minutes,
-                                                        'seconds': seconds,
-                                                        'timestamp': timestamp,
-                                                        'thumbnailHash': video_hash
-                                                    })
-                                                except (ValueError, IndexError):
-                                                    pass
+                                                    # Extract full timestamp for video entry
+                                                    try:
+                                                        minutes = int(parts[1])
+                                                        seconds = int(parts[2].split('-')[0])
+                                                        timestamp = file_hour * 3600 + minutes * 60 + seconds
+                                                        
+                                                        videos_by_hour[hour_str].append({
+                                                            'filename': file_item.name,
+                                                            'eventType': event_type,
+                                                            'hour': file_hour,
+                                                            'minutes': minutes,
+                                                            'seconds': seconds,
+                                                            'timestamp': timestamp,
+                                                        })
+                                                    except (ValueError, IndexError):
+                                                        pass
                                         except ValueError:
                                             pass
                             except OSError:
@@ -210,27 +204,17 @@ class DataService:
 
 class ExplorerHandler(http.server.SimpleHTTPRequestHandler):
     """HTTP request handler for the explorer server."""
-    default_data_path = None
-    
-    @property
-    def path_resolver(self):
-        """Lazy initialization of path resolver."""
-        if not hasattr(self, '_path_resolver'):
-            self._path_resolver = PathResolver()
-        return self._path_resolver
-    
+
     @property
     def thumbnail_service(self):
-        """Lazy initialization of thumbnail service."""
         if not hasattr(self, '_thumbnail_service'):
             self._thumbnail_service = ThumbnailService()
         return self._thumbnail_service
-    
+
     @property
     def data_service(self):
-        """Lazy initialization of data service."""
         if not hasattr(self, '_data_service'):
-            self._data_service = DataService(self.path_resolver, self.thumbnail_service)
+            self._data_service = DataService(self.thumbnail_service)
         return self._data_service
     
     def log_message(self, format, *args):
@@ -268,11 +252,6 @@ class ExplorerHandler(http.server.SimpleHTTPRequestHandler):
         parsed_path = urllib.parse.urlparse(self.path)
         query_params = urllib.parse.parse_qs(parsed_path.query)
         
-        # API endpoint: get default data path
-        if parsed_path.path == '/api/default-data-path':
-            self.send_json_response({'defaultDataPath': self.default_data_path or ''})
-            return
-        
         # API endpoint: list days
         if parsed_path.path == '/api/list-days':
             self.handle_list_days(query_params)
@@ -294,64 +273,48 @@ class ExplorerHandler(http.server.SimpleHTTPRequestHandler):
     def handle_list_days(self, query_params):
         """Handle /api/list-days endpoint."""
         try:
-            data_path = query_params.get('path', [''])[0]
-            if not data_path:
-                self.send_error(400, "Missing path parameter")
-                return
-            
-            result = self.data_service.list_days(data_path)
+            result = self.data_service.list_days()
             self.send_json_response(result)
+        except PermissionError as e:
+            self.send_error(403, str(e))
         except FileNotFoundError as e:
             self.send_error(404, str(e))
         except Exception as e:
             import traceback
-            error_msg = f"Error listing days: {str(e)}\n{traceback.format_exc()}"
-            print(error_msg)  # Log full error for debugging
+            print(f"Error listing days: {str(e)}\n{traceback.format_exc()}")
             self.send_error(500, f"Error listing days: {str(e)}")
     
     def handle_serve_video(self, query_params):
         """Handle /api/video endpoint."""
         try:
-            data_path = query_params.get('path', [''])[0]
             day = query_params.get('day', [''])[0]
             event_type = query_params.get('eventType', [''])[0]
             filename = query_params.get('file', [''])[0]
-            
-            if not data_path or not day or not event_type or not filename:
+
+            if not day or not event_type or not filename:
                 self.send_error(400, "Missing required parameters")
                 return
-            
-            # Resolve path relative to workspace root
-            base_path = self.path_resolver.resolve_data_path(data_path)
+
+            # Validate each path component to prevent traversal
+            if not all(PathResolver.safe_path_component(c) for c in (day, event_type, filename)):
+                self.send_error(400, "Invalid path component")
+                return
+
+            base_path = PathResolver._configured_data_path
             file_path = base_path / day / event_type / filename
             
             # Security check: ensure file is within the data directory
-            data_dir = base_path.resolve()
-            file_path_resolved = file_path.resolve()
-            if not str(file_path_resolved).startswith(str(data_dir)):
+            if not PathResolver.is_path_within_directory(file_path, base_path):
                 self.send_error(403, "Access denied")
                 return
-            
-            if not file_path_resolved.exists() or not file_path_resolved.is_file():
+
+            file_path = file_path.resolve()
+            if not file_path.exists() or not file_path.is_file():
                 self.send_error(404, "File not found")
                 return
-            
-            file_path = file_path_resolved
-            
-            # Determine content type
+
             suffix = file_path.suffix.lower()
-            content_type_map = {
-                '.mp4': 'video/mp4',
-                '.avi': 'video/x-msvideo',
-                '.mov': 'video/quicktime',
-                '.mkv': 'video/x-matroska',
-                '.webm': 'video/webm',
-                '.jpg': 'image/jpeg',
-                '.jpeg': 'image/jpeg',
-                '.png': 'image/png',
-                '.gif': 'image/gif'
-            }
-            content_type = content_type_map.get(suffix, 'application/octet-stream')
+            content_type = CONTENT_TYPE_MAP.get(suffix, 'application/octet-stream')
             
             # Serve file with range support for video streaming
             file_size = file_path.stat().st_size
@@ -388,121 +351,108 @@ class ExplorerHandler(http.server.SimpleHTTPRequestHandler):
                 
                 with open(file_path, 'rb') as f:
                     self.wfile.write(f.read())
+        except PermissionError as e:
+            self.send_error(403, str(e))
         except Exception as e:
             self.send_error(500, f"Error serving video: {str(e)}")
     
     def handle_day_data(self, query_params):
         """Handle /api/day-data endpoint."""
         try:
-            data_path = query_params.get('path', [''])[0]
             day = query_params.get('day', [''])[0]
-            
-            if not data_path or not day:
-                self.send_error(400, "Missing path or day parameter")
+
+            if not day:
+                self.send_error(400, "Missing day parameter")
                 return
-            
-            result = self.data_service.get_day_data(data_path, day)
+
+            result = self.data_service.get_day_data(day)
             self.send_json_response(result)
+        except PermissionError as e:
+            self.send_error(403, str(e))
         except FileNotFoundError as e:
             self.send_error(404, str(e))
         except Exception as e:
             self.send_error(500, f"Error getting day data: {str(e)}")
     
     def handle_serve_thumbnail(self, query_params):
-        """Handle /api/thumbnail endpoint."""
+        """Handle /api/thumbnail endpoint using only the video path."""
         try:
-            data_path = query_params.get('path', [''])[0]
-            hash_hex = query_params.get('hash', [''])[0]
-            video_path_str = query_params.get('video', [''])[0]  # Optional: path to video for on-demand generation
-            
-            if not data_path:
-                self.send_error(400, "Missing path parameter")
+            video_path_str = query_params.get('video', [''])[0]
+            base_path = PathResolver._configured_data_path
+
+            if not video_path_str:
+                self.send_error(400, "Missing video parameter")
                 return
-            
-            base_path = self.path_resolver.resolve_data_path(data_path)
-            
-            # If hash is provided, try to serve existing thumbnail
-            if hash_hex:
-                # Validate hash format
-                if len(hash_hex) != 64 or not all(c in '0123456789abcdefABCDEF' for c in hash_hex):
-                    self.send_error(400, "Invalid hash format")
+
+            # Parse video path: day/eventType/filename
+            parts = video_path_str.split('/')
+            if len(parts) != 3:
+                self.send_error(400, "Invalid video path format")
+                return
+
+            day, event_type, filename = parts
+
+            # Validate each component before constructing the path
+            if not all(PathResolver.safe_path_component(c) for c in (day, event_type, filename)):
+                self.send_error(400, "Invalid path component")
+                return
+
+            video_path = base_path / day / event_type / filename
+
+            # Ensure video is within the data directory and exists
+            if not PathResolver.is_path_within_directory(video_path, base_path) or not video_path.exists():
+                self.send_error(404, "Video not found")
+                return
+
+            # If it's a video, generate/use thumbnail and serve it
+            if video_path.suffix.lower() in VIDEO_EXTENSIONS:
+                hash_hex = self.thumbnail_service.generate_thumbnail_for_video(video_path, base_path)
+                if not hash_hex:
+                    self.send_error(500, "Failed to generate thumbnail")
                     return
-                
-                # Try to find existing thumbnail
+
                 thumbnail_path = self.thumbnail_service.get_thumbnail_path(base_path, hash_hex)
-                
-                if thumbnail_path.exists() and thumbnail_path.is_file():
-                    # Security check
-                    data_dir = base_path.resolve()
-                    thumbnail_resolved = thumbnail_path.resolve()
-                    if str(thumbnail_resolved).startswith(str(data_dir)):
-                        self.send_response(200)
-                        self.send_header('Content-Type', 'image/jpeg')
-                        self.send_header('Cache-Control', 'public, max-age=31536000')
-                        file_size = thumbnail_path.stat().st_size
-                        self.send_header('Content-Length', str(file_size))
-                        self.end_headers()
-                        with open(thumbnail_path, 'rb') as f:
-                            self.wfile.write(f.read())
-                        return
-            
-            # If video path is provided and thumbnail doesn't exist, generate it
-            if video_path_str:
-                # Parse video path: day/eventType/filename
-                parts = video_path_str.split('/')
-                if len(parts) == 3:
-                    day, event_type, filename = parts
-                    video_path = base_path / day / event_type / filename
-                    
-                    # Security check: ensure file is within the data directory
-                    data_dir = base_path.resolve()
-                    video_resolved = video_path.resolve()
-                    if str(video_resolved).startswith(str(data_dir)) and video_path.exists():
-                        # Check if it's actually a video file (not an image)
-                        VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
-                        if video_path.suffix.lower() in VIDEO_EXTENSIONS:
-                            # Generate thumbnail
-                            hash_hex = self.thumbnail_service.generate_thumbnail_for_video(video_path, base_path)
-                            if hash_hex:
-                                # Serve the newly generated thumbnail
-                                thumbnail_path = self.thumbnail_service.get_thumbnail_path(base_path, hash_hex)
-                                if thumbnail_path.exists():
-                                    self.send_response(200)
-                                    self.send_header('Content-Type', 'image/jpeg')
-                                    self.send_header('Cache-Control', 'public, max-age=31536000')
-                                    file_size = thumbnail_path.stat().st_size
-                                    self.send_header('Content-Length', str(file_size))
-                                    self.end_headers()
-                                    with open(thumbnail_path, 'rb') as f:
-                                        self.wfile.write(f.read())
-                                    return
-                        else:
-                            # It's an image, serve it directly
-                            self.send_response(200)
-                            content_type = 'image/jpeg' if video_path.suffix.lower() in {'.jpg', '.jpeg'} else 'image/png'
-                            self.send_header('Content-Type', content_type)
-                            file_size = video_path.stat().st_size
-                            self.send_header('Content-Length', str(file_size))
-                            self.end_headers()
-                            with open(video_path, 'rb') as f:
-                                self.wfile.write(f.read())
-                            return
-            
-            # Thumbnail not found and couldn't generate
-            self.send_error(404, "Thumbnail not found")
-                
+                if not thumbnail_path.exists() or not thumbnail_path.is_file():
+                    self.send_error(500, "Thumbnail file missing after generation")
+                    return
+
+                self.send_response(200)
+                self.send_header('Content-Type', 'image/jpeg')
+                self.send_header('Cache-Control', 'public, max-age=31536000')
+                file_size = thumbnail_path.stat().st_size
+                self.send_header('Content-Length', str(file_size))
+                self.end_headers()
+                with open(thumbnail_path, 'rb') as f:
+                    self.wfile.write(f.read())
+                return
+
+            # If it's an image, serve the image directly
+            if video_path.suffix.lower() in IMAGE_EXTENSIONS:
+                self.send_response(200)
+                content_type = 'image/jpeg' if video_path.suffix.lower() in {'.jpg', '.jpeg'} else 'image/png'
+                self.send_header('Content-Type', content_type)
+                file_size = video_path.stat().st_size
+                self.send_header('Content-Length', str(file_size))
+                self.end_headers()
+                with open(video_path, 'rb') as f:
+                    self.wfile.write(f.read())
+                return
+
+            # Unsupported file type for thumbnailing
+            self.send_error(400, "Unsupported file type for thumbnail")
+
         except Exception as e:
             self.send_error(500, f"Error serving thumbnail: {str(e)}")
 
 
 def run_server(port=8080, data_path=None):
-    # Set the default data path for the handler
-    ExplorerHandler.default_data_path = data_path
-    
+    if data_path:
+        PathResolver.set_configured_path(data_path)
+
     with socketserver.TCPServer(("0.0.0.0", port), ExplorerHandler) as httpd:
         print(f"Explorer server running on http://localhost:{port}")
         if data_path:
-            print(f"Default data path: {data_path}")
+            print(f"Data path: {PathResolver._configured_data_path}")
         print(f"Open http://localhost:{port}/index.html in your browser")
         httpd.serve_forever()
 

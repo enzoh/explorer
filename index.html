@@ -445,37 +445,12 @@
         const mainVideoPlayer = document.getElementById('mainVideoPlayer');
         const videoTimeline = document.getElementById('videoTimeline');
         
-        let currentDataPath = '';
+
         let charts = {}; // Store chart instances
         let allDays = []; // Store all available days (array of {date, hasEvents})
         let currentWeekOffset = 0; // Track which week we're viewing
         let cachedDayData = {}; // Cache day data: {day: {hourlyStats, hourlyStatsByType, videosByHour}}
         
-        // Load default data path from server on page load
-        async function loadDefaultDataPath() {
-            try {
-                const response = await fetch('/api/default-data-path');
-                if (!response.ok) {
-                    throw new Error(`Server error: ${response.status}`);
-                }
-                const data = await response.json();
-                console.log('Default data path response:', data);
-                
-                if (data && data.defaultDataPath && data.defaultDataPath.trim() !== '') {
-                    currentDataPath = data.defaultDataPath;
-                    console.log('Data path set to:', currentDataPath);
-                    loadDaysForGraphs();
-                } else {
-                    const errorMsg = 'Error: No data path configured on server. Please restart the server with --data-path argument or enter the path when prompted.';
-                    console.error(errorMsg, 'Response data:', data);
-                    graphsContainer.innerHTML = `<div class="empty-state">${errorMsg}</div>`;
-                }
-            } catch (error) {
-                console.error('Error loading default data path:', error);
-                const errorMsg = 'Error: Could not connect to server or retrieve data path. Make sure the server is running.';
-                graphsContainer.innerHTML = `<div class="empty-state">${errorMsg}</div>`;
-            }
-        }
         
         // Format date to show month and year (e.g., "January 2026")
         function formatMonthYear(dateString) {
@@ -611,13 +586,8 @@
         
         // Load days for graphs view
         async function loadDaysForGraphs() {
-            if (!currentDataPath) {
-                console.error('Cannot load days for graphs: data path not set');
-                return;
-            }
-            
             try {
-                const response = await fetch(`/api/list-days?path=${encodeURIComponent(currentDataPath)}`);
+                const response = await fetch('/api/list-days');
                 if (!response.ok) {
                     throw new Error(`Server error: ${response.status} ${response.statusText}`);
                 }
@@ -702,20 +672,20 @@
         
         
         async function loadThumbnailsForDay(day) {
-            if (!day || !currentDataPath) {
+            if (!day) {
                 thumbnailGrid.innerHTML = '';
                 return;
             }
-            
+
             thumbnailGrid.innerHTML = '<div style="padding: 20px; color: #666; text-align: center;">Loading thumbnails...</div>';
-            
+
             try {
                 // Use cached data if available, otherwise fetch
                 let dayData = cachedDayData[day];
                 if (!dayData) {
-                    const response = await fetch(`/api/day-data?path=${encodeURIComponent(currentDataPath)}&day=${encodeURIComponent(day)}`);
+                    const response = await fetch(`/api/day-data?day=${encodeURIComponent(day)}`);
                     dayData = await response.json();
-                    cachedDayData[day] = dayData; // Cache the data
+                    cachedDayData[day] = dayData;
                 }
                 
                 if (!dayData.hourlyStats || Object.keys(dayData.hourlyStats).length === 0) {
@@ -748,16 +718,14 @@
                     thumbnailItem.className = 'timeline-video-item';
                     
                     const isImage = video.filename.endsWith('.jpg') || video.filename.endsWith('.jpeg');
-                    const videoSrc = `/api/video?path=${encodeURIComponent(currentDataPath)}&day=${encodeURIComponent(day)}&eventType=${encodeURIComponent(video.eventType)}&file=${encodeURIComponent(video.filename)}`;
+                    const videoSrc = `/api/video?day=${encodeURIComponent(day)}&eventType=${encodeURIComponent(video.eventType)}&file=${encodeURIComponent(video.filename)}`;
                     
                     const mediaElement = document.createElement('img');
                     if (isImage) {
                         mediaElement.src = videoSrc;
-                    } else if (video.thumbnailHash) {
-                        mediaElement.src = `/api/thumbnail?path=${encodeURIComponent(currentDataPath)}&hash=${video.thumbnailHash}`;
                     } else {
                         const videoPath = `${day}/${video.eventType}/${video.filename}`;
-                        mediaElement.src = `/api/thumbnail?path=${encodeURIComponent(currentDataPath)}&video=${encodeURIComponent(videoPath)}`;
+                        mediaElement.src = `/api/thumbnail?video=${encodeURIComponent(videoPath)}`;
                     }
                     
                     // Handle thumbnail load errors - fallback to video element
@@ -802,25 +770,25 @@
         }
         
         async function loadHourlyGraph() {
-            if (!selectedDay || !currentDataPath) {
+            if (!selectedDay) {
                 graphsContainer.innerHTML = '<div class="empty-state">Select a day to view hourly graph</div>';
                 thumbnailGrid.innerHTML = '';
                 return;
             }
-            
+
             const day = selectedDay;
-            
+
             graphsContainer.innerHTML = '<div class="empty-state">Loading hourly graph...</div>';
-            
+
             // Destroy existing charts
             Object.values(charts).forEach(chart => chart.destroy());
             charts = {};
-            
+
             try {
                 // Use cached data if available, otherwise fetch
                 let data = cachedDayData[day];
                 if (!data) {
-                    const response = await fetch(`/api/day-data?path=${encodeURIComponent(currentDataPath)}&day=${encodeURIComponent(day)}`);
+                    const response = await fetch(`/api/day-data?day=${encodeURIComponent(day)}`);
                     data = await response.json();
                     cachedDayData[day] = data; // Cache the data
                 }
@@ -943,26 +911,21 @@
         }
         
         async function openVideoPlayerForHour(day, hour, selectedVideo = null) {
-            if (!currentDataPath) {
-                console.error('Cannot load videos: data path not set');
-                return;
-            }
-            
             console.log('openVideoPlayerForHour called:', { day, hour, selectedVideo });
             showVideoView();
             videoTimeline.innerHTML = '<div style="padding: 20px; color: #666;">Loading videos...</div>';
             mainVideoPlayer.src = '';
-            
+
             try {
                 // Use cached data if available, otherwise fetch
                 let dayData = cachedDayData[day];
                 if (!dayData) {
-                    const response = await fetch(`/api/day-data?path=${encodeURIComponent(currentDataPath)}&day=${encodeURIComponent(day)}`);
+                    const response = await fetch(`/api/day-data?day=${encodeURIComponent(day)}`);
                     if (!response.ok) {
                         throw new Error(`Server error: ${response.status} ${response.statusText}`);
                     }
                     dayData = await response.json();
-                    cachedDayData[day] = dayData; // Cache the data
+                    cachedDayData[day] = dayData;
                 }
                 
                 // Collect videos from hour-1, hour, and hour+1
@@ -1003,28 +966,21 @@
                 videos.forEach((video, index) => {
                     const videoItem = document.createElement('div');
                     videoItem.className = 'timeline-video-item';
+                    const isImage = video.filename.endsWith('.jpg') || video.filename.endsWith('.jpeg');
+                    const videoSrc = `/api/video?day=${encodeURIComponent(day)}&eventType=${encodeURIComponent(video.eventType)}&file=${encodeURIComponent(video.filename)}`;
+
                     if (index === selectedIndex) {
                         videoItem.classList.add('active');
-                        // Load selected video in main player
-                        const videoSrc = `/api/video?path=${encodeURIComponent(currentDataPath)}&day=${encodeURIComponent(day)}&eventType=${encodeURIComponent(video.eventType)}&file=${encodeURIComponent(video.filename)}`;
                         mainVideoPlayer.src = videoSrc;
                         mainVideoPlayer.play();
                     }
-                    
-                    const isImage = video.filename.endsWith('.jpg') || video.filename.endsWith('.jpeg');
-                    const videoSrc = `/api/video?path=${encodeURIComponent(currentDataPath)}&day=${encodeURIComponent(day)}&eventType=${encodeURIComponent(video.eventType)}&file=${encodeURIComponent(video.filename)}`;
-                    
+
                     const mediaElement = document.createElement('img');
                     if (isImage) {
-                        // For images, use the image directly
                         mediaElement.src = videoSrc;
-                    } else if (video.thumbnailHash) {
-                        // Use thumbnail if hash is available
-                        mediaElement.src = `/api/thumbnail?path=${encodeURIComponent(currentDataPath)}&hash=${video.thumbnailHash}`;
                     } else {
-                        // Fallback: generate thumbnail on-demand
                         const videoPath = `${day}/${video.eventType}/${video.filename}`;
-                        mediaElement.src = `/api/thumbnail?path=${encodeURIComponent(currentDataPath)}&video=${encodeURIComponent(videoPath)}`;
+                        mediaElement.src = `/api/thumbnail?video=${encodeURIComponent(videoPath)}`;
                     }
                     
                     // Handle thumbnail load errors - fallback to video element
@@ -1075,7 +1031,7 @@
         }
         
         // Initial load - load default data path first, which will then load days
-        loadDefaultDataPath();
+        loadDaysForGraphs();
     </script>
 </body>
 </html>

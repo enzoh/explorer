@@ -10,6 +10,9 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+# Only support mp4 videos for thumbnail generation.
+VIDEO_EXTENSIONS = {'.mp4'}
+
 
 def extract_frame(video_path: Path, output_path: Path, timestamp: float = 1.0) -> bool:
     """
@@ -153,7 +156,6 @@ def scan_and_process(data_dir: Path, timestamp: float = 1.0, verbose: bool = Fal
         timestamp: Time in seconds to extract frame
         verbose: Print progress information
     """
-    video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
     processed = 0
     skipped = 0
     errors = 0
@@ -176,7 +178,7 @@ def scan_and_process(data_dir: Path, timestamp: float = 1.0, verbose: bool = Fal
                 if not video_file.is_file():
                     continue
                 
-                if video_file.suffix.lower() not in video_extensions:
+                if video_file.suffix.lower() not in VIDEO_EXTENSIONS:
                     continue
                 
                 # Skip deadbeef files
