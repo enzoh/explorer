@@ -317,9 +317,8 @@ def main():
     )
     logger = logging.getLogger('[main]')
 
-    # Define the web server and thread.
+    # Define the web server.
     server = None
-    thread = None
 
     # Define the shutdown event.
     shutdown_event = threading.Event()
