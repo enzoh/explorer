@@ -146,10 +146,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     match = self._event_file_pattern.match(event_file)
                     if match:
                         hh, mm, ss = map(int, match.groups())
+                        time = f'{hh:02d}:{mm:02d}:{ss:02d}'
                         events.append({
                             'event_type': event_type,
                             'file': f'{date}/{event_type}/{event_file}',
-                            'timestamp': f'{date}T{hh}:{mm}:{ss}Z'
+                            'timestamp': f'{date}T{time}Z'
                         })
 
         # Sort the events chronologically.
