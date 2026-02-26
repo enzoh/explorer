@@ -584,26 +584,83 @@
             }
         }
         
+        // Transform a flat /api/data event list into the hourly structure the UI needs.
+        function transformEventsToHourlyData(events, day) {
+            const hourlyStats = {};
+            const hourlyStatsByType = {};
+            const videosByHour = {};
+            for (let i = 0; i < 24; i++) {
+                const h = String(i).padStart(2, '0');
+                hourlyStats[h] = 0;
+                hourlyStatsByType[h] = {};
+                videosByHour[h] = [];
+            }
+            for (const event of events) {
+                // event.file === "YYYY-MM-DD/event-type/HH-MM-SS-....ext"
+                const fileParts = event.file.split('/');
+                if (fileParts.length !== 3) continue;
+                const filename = fileParts[2];
+                const nameParts = filename.split('-');
+                if (nameParts.length < 3) continue;
+                const hour = parseInt(nameParts[0], 10);
+                const minutes = parseInt(nameParts[1], 10);
+                const seconds = parseInt(nameParts[2], 10);
+                if (isNaN(hour) || isNaN(minutes) || isNaN(seconds)) continue;
+                const hourStr = String(hour).padStart(2, '0');
+                hourlyStats[hourStr]++;
+                if (!hourlyStatsByType[hourStr][event.event_type]) {
+                    hourlyStatsByType[hourStr][event.event_type] = 0;
+                }
+                hourlyStatsByType[hourStr][event.event_type]++;
+                videosByHour[hourStr].push({
+                    filename,
+                    file: event.file,
+                    eventType: event.event_type,
+                    hour,
+                    minutes,
+                    seconds,
+                    timestamp: hour * 3600 + minutes * 60 + seconds,
+                });
+            }
+            for (const h in videosByHour) {
+                videosByHour[h].sort((a, b) => a.timestamp - b.timestamp);
+            }
+            return { hourlyStats, hourlyStatsByType, videosByHour, day };
+        }
+
+        // Fetch and cache hourly data for a day using /api/data.
+        async function fetchDayData(day) {
+            if (cachedDayData[day]) return cachedDayData[day];
+            const response = await fetch(`/api/data?date=${encodeURIComponent(day)}`);
+            if (!response.ok) throw new Error(`Server error: ${response.status} ${response.statusText}`);
+            const events = await response.json();
+            const result = transformEventsToHourlyData(events, day);
+            cachedDayData[day] = result;
+            return result;
+        }
+
         // Load days for graphs view
         async function loadDaysForGraphs() {
             try {
-                const response = await fetch('/api/list-days');
+                const response = await fetch('/api/list');
                 if (!response.ok) {
                     throw new Error(`Server error: ${response.status} ${response.statusText}`);
                 }
-                const data = await response.json();
-                
-                if (!data || !data.days) {
-                    throw new Error('Invalid response from server');
-                }
-                
-                // Store all days (convert to array format if needed)
-                allDays = data.days.map(day => {
-                    if (typeof day === 'string') {
-                        return { date: day, hasEvents: true };
+                const dates = await response.json(); // flat array of date strings
+
+                // Fill in every calendar day between first and last so the strip is continuous.
+                const datesSet = new Set(dates);
+                allDays = [];
+                if (dates.length > 0) {
+                    const sorted = [...dates].sort();
+                    let cur = new Date(sorted[0] + 'T00:00:00');
+                    const last = new Date(sorted[sorted.length - 1] + 'T00:00:00');
+                    while (cur <= last) {
+                        const dateStr = cur.toISOString().split('T')[0];
+                        allDays.push({ date: dateStr, hasEvents: datesSet.has(dateStr) });
+                        cur.setDate(cur.getDate() + 1);
                     }
-                    return day;
-                });
+                }
                 
                 console.log(`[DEBUG] Loaded ${allDays.length} days total`);
                 console.log(`[DEBUG] Days with events: ${allDays.filter(d => d.hasEvents).length}`);
@@ -680,13 +737,7 @@
             thumbnailGrid.innerHTML = '<div style="padding: 20px; color: #666; text-align: center;">Loading thumbnails...</div>';
 
             try {
-                // Use cached data if available, otherwise fetch
-                let dayData = cachedDayData[day];
-                if (!dayData) {
-                    const response = await fetch(`/api/day-data?day=${encodeURIComponent(day)}`);
-                    dayData = await response.json();
-                    cachedDayData[day] = dayData;
-                }
+                const dayData = await fetchDayData(day);
                 
                 if (!dayData.hourlyStats || Object.keys(dayData.hourlyStats).length === 0) {
                     thumbnailGrid.innerHTML = '<div style="grid-column: 1 / -1; text-align: center; color: #666; padding: 20px;">No videos found for this day</div>';
@@ -717,16 +768,10 @@
                     const thumbnailItem = document.createElement('div');
                     thumbnailItem.className = 'timeline-video-item';
                     
-                    const isImage = video.filename.endsWith('.jpg') || video.filename.endsWith('.jpeg');
-                    const videoSrc = `/api/video?day=${encodeURIComponent(day)}&eventType=${encodeURIComponent(video.eventType)}&file=${encodeURIComponent(video.filename)}`;
+                    const videoSrc = `/data/${video.file}`;
                     
                     const mediaElement = document.createElement('img');
-                    if (isImage) {
-                        mediaElement.src = videoSrc;
-                    } else {
-                        const videoPath = `${day}/${video.eventType}/${video.filename}`;
-                        mediaElement.src = `/api/thumbnail?video=${encodeURIComponent(videoPath)}`;
-                    }
+                    mediaElement.src = `/thumbnail/${video.file}`;
                     
                     // Handle thumbnail load errors - fallback to video element
                     mediaElement.onerror = function() {
@@ -785,13 +830,7 @@
             charts = {};
 
             try {
-                // Use cached data if available, otherwise fetch
-                let data = cachedDayData[day];
-                if (!data) {
-                    const response = await fetch(`/api/day-data?day=${encodeURIComponent(day)}`);
-                    data = await response.json();
-                    cachedDayData[day] = data; // Cache the data
-                }
+                const data = await fetchDayData(day);
                 
                 if (!data.hourlyStats || Object.keys(data.hourlyStats).length === 0) {
                     graphsContainer.innerHTML = '<div class="empty-state">No event data found for this day</div>';
@@ -917,16 +956,7 @@
             mainVideoPlayer.src = '';
 
             try {
-                // Use cached data if available, otherwise fetch
-                let dayData = cachedDayData[day];
-                if (!dayData) {
-                    const response = await fetch(`/api/day-data?day=${encodeURIComponent(day)}`);
-                    if (!response.ok) {
-                        throw new Error(`Server error: ${response.status} ${response.statusText}`);
-                    }
-                    dayData = await response.json();
-                    cachedDayData[day] = dayData;
-                }
+                const dayData = await fetchDayData(day);
                 
                 // Collect videos from hour-1, hour, and hour+1
                 const videos = [];
@@ -966,8 +996,7 @@
                 videos.forEach((video, index) => {
                     const videoItem = document.createElement('div');
                     videoItem.className = 'timeline-video-item';
-                    const isImage = video.filename.endsWith('.jpg') || video.filename.endsWith('.jpeg');
-                    const videoSrc = `/api/video?day=${encodeURIComponent(day)}&eventType=${encodeURIComponent(video.eventType)}&file=${encodeURIComponent(video.filename)}`;
+                    const videoSrc = `/data/${video.file}`;
 
                     if (index === selectedIndex) {
                         videoItem.classList.add('active');
@@ -976,12 +1005,7 @@
                     }
 
                     const mediaElement = document.createElement('img');
-                    if (isImage) {
-                        mediaElement.src = videoSrc;
-                    } else {
-                        const videoPath = `${day}/${video.eventType}/${video.filename}`;
-                        mediaElement.src = `/api/thumbnail?video=${encodeURIComponent(videoPath)}`;
-                    }
+                    mediaElement.src = `/thumbnail/${video.file}`;
                     
                     // Handle thumbnail load errors - fallback to video element
                     mediaElement.onerror = function() {
