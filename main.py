@@ -213,7 +213,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 continue
 
         # Sort the dates chronologically.
-        dates.sort()
+        dates.sort(reverse=True)
 
         # Encode the dates in JSON format.
         body = json.dumps(dates).encode('utf-8')
