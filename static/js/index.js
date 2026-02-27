@@ -174,16 +174,16 @@
                     video.pause()
                 }
                 break
-            // Move the playhead a quarter second backwards.
+            // Move the playhead a half second backwards.
             case 'KeyJ':
                 event.preventDefault()
-                video.currentTime = Math.max(video.currentTime - 0.25, 0)
+                video.currentTime = Math.max(video.currentTime - 0.5, 0)
                 break
-            // Move the playhead a quarter second forwards.
+            // Move the playhead a half second forwards.
             case 'KeyL':
                 event.preventDefault()
                 video.currentTime = Math.min(
-                    video.currentTime + 0.25,
+                    video.currentTime + 0.5,
                     video.duration,
                 )
                 break
