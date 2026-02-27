@@ -88,6 +88,8 @@ function selectEvent(index) {
         video.src = `/data/${event.file}`;
         video.controls = true;
         video.autoplay = true;
+        video.muted = true;
+        video.className = "controls";
         viewer.appendChild(video);
     } else {
         const img = document.createElement('img');

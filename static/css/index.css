@@ -1,3 +1,7 @@
+/**
+ * General Styles
+ */
+
 :root {
     --background-color: #000000;
     --foreground-color: #39ff14;
@@ -19,6 +23,18 @@ body {
     margin: 0;
     overflow: hidden;
 }
+
+#main {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+}
+
+/**
+ * Navigation
+ */
 
 #navbar {
     box-sizing: border-box;
@@ -47,13 +63,9 @@ body {
     color: var(--background-color);
 }
 
-#main {
-    display: flex;
-    flex: 1;
-    flex-direction: column;
-    height: 100%;
-    overflow: hidden;
-}
+/**
+ * Viewer
+ */
 
 #viewer {
     align-items: center;
@@ -69,6 +81,27 @@ body {
     max-width: 100%;
     object-fit: contain;
 }
+
+.controls::-webkit-media-controls-panel,
+.controls::-webkit-media-controls-play-button,
+.controls::-webkit-media-controls-start-playback-button,
+.controls::-webkit-media-controls-overlay-play-button,
+.controls::-webkit-media-controls-timeline {
+    opacity: 0 !important;
+    transition: opacity 0.2s;
+}
+
+#viewer:hover .controls::-webkit-media-controls-panel,
+#viewer:hover .controls::-webkit-media-controls-play-button,
+#viewer:hover .controls::-webkit-media-controls-start-playback-button,
+#viewer:hover .controls::-webkit-media-controls-overlay-play-button,
+#viewer:hover .controls::-webkit-media-controls-timeline {
+    opacity: 1 !important;
+}
+
+/**
+ * Events
+ */
 
 #events {
     align-items: center;
