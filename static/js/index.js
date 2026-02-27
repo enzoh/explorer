@@ -1,119 +1,217 @@
-let currentEvents = [];
-let currentIndex = 0;
+;(() => {
+    'use strict'
 
-/* Utility */
-function clearActive(selector) {
-    document.querySelectorAll(selector).forEach(el => el.classList.remove("active"));
-}
-
-/* Load Dates */
-async function loadDates() {
-    const res = await fetch('/api/list');
-    const dates = await res.json();
-
-    // Sort newest first
-    dates.sort((a, b) => b.localeCompare(a));
-
-    const container = document.getElementById('dates');
-    container.innerHTML = '';
-
-    dates.forEach(date => {
-        const div = document.createElement('div');
-        div.textContent = date;
-        div.className = 'date-item';
-        div.onclick = () => selectDate(date, div);
-        container.appendChild(div);
-    });
-
-    if (dates.length > 0) {
-        container.firstChild.click(); // auto select newest date
+    // Define application state.
+    const state = {
+        index: -1,
+        events: [],
     }
-}
 
-/* Select Date */
-async function selectDate(date, element) {
-    clearActive('.date-item');
-    element.classList.add('active');
-
-    const res = await fetch(`/api/data?date=${date}`);
-    const events = await res.json();
-
-    // Sort newest first
-    events.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-
-    currentEvents = events;
-    renderEvents();
-
-    if (events.length > 0) {
-        selectEvent(0); // auto select newest event
-    } else {
-        document.getElementById('viewer').innerHTML = '';
+    // Define DOM element cache.
+    const dom = {
+        dates: document.getElementById('dates'),
+        events: document.getElementById('events'),
+        viewer: document.getElementById('viewer'),
     }
-}
 
-/* Render Event Thumbnails */
-function renderEvents() {
-    const row = document.getElementById('events');
-    row.innerHTML = '';
+    // Check if a file is a image.
+    function isImage(file) {
+        return file.toLowerCase().endsWith('.jpg')
+    }
 
-    currentEvents.forEach((event, index) => {
-        const img = document.createElement('img');
-        img.className = 'event-thumb';
+    // Check if a file is a video.
+    function isVideo(file) {
+        return file.toLowerCase().endsWith('.mp4')
+    }
 
-        if (event.file.endsWith('.mp4')) {
-            img.src = `/thumbnail/${event.file}`;
-        } else {
-            img.src = `/data/${event.file}`;
+    // Fetch a JSON object.
+    function safeFetchJSON(url) {
+        return fetch(url).then((response) => {
+            if (!response.ok) {
+                throw new Error(`Request failed: ${response.status}`)
+            }
+            return response.json()
+        })
+    }
+
+    // Select a date.
+    async function selectDate(date) {
+        try {
+            const dateElems = [...dom.dates.querySelectorAll('.date-item')]
+            dateElems.forEach((dateElem) => {
+                dateElem.classList.remove('active')
+            })
+            const selected = dateElems.find((candidate) => {
+                return candidate.dataset.date === date
+            })
+            if (selected) {
+                selected.classList.add('active')
+            }
+            const query = `?date=${encodeURIComponent(date)}`
+            state.events = await safeFetchJSON(`/api/data${query}`)
+            renderThumbnails()
+            if (state.events.length > 0) {
+                selectEvent(0)
+            } else {
+                dom.viewer.innerHTML = ''
+                state.index = -1
+            }
+        } catch (err) {
+            console.error('Failed to load events:', err)
         }
-
-        img.onclick = () => selectEvent(index);
-        row.appendChild(img);
-    });
-}
-
-/* Select Event */
-function selectEvent(index) {
-    currentIndex = index;
-
-    clearActive('.event-thumb');
-    document.querySelectorAll('.event-thumb')[index].classList.add('active');
-
-    const viewer = document.getElementById('viewer');
-    viewer.innerHTML = '';
-
-    const event = currentEvents[index];
-
-    if (event.file.endsWith('.mp4')) {
-        const video = document.createElement('video');
-        video.src = `/data/${event.file}`;
-        video.controls = true;
-        video.autoplay = true;
-        video.muted = true;
-        video.className = "controls";
-        viewer.appendChild(video);
-    } else {
-        const img = document.createElement('img');
-        img.src = `/data/${event.file}`;
-        viewer.appendChild(img);
     }
 
-    // Auto-scroll selected thumbnail into view
-    document.querySelectorAll('.event-thumb')[index]
-        .scrollIntoView({ behavior: "smooth", inline: "center" });
-}
-
-/* Keyboard Navigation */
-document.addEventListener('keydown', (e) => {
-    if (!currentEvents.length) return;
-
-    if (e.key === 'ArrowRight' && currentIndex < currentEvents.length - 1) {
-        selectEvent(currentIndex + 1);
+    // Select an event.
+    function selectEvent(i) {
+        if (i < 0 || i >= state.events.length) {
+            return
+        }
+        state.index = i
+        const eventElems = [...dom.events.querySelectorAll('.event-item')]
+        eventElems.forEach((eventElem) => {
+            eventElem.classList.remove('active')
+        })
+        const selected = eventElems[i]
+        if (selected) {
+            selected.classList.add('active')
+            selected.scrollIntoView({
+                behavior: 'smooth',
+                block: 'nearest',
+                inline: 'center',
+            })
+        }
+        renderViewer(state.events[i])
     }
 
-    if (e.key === 'ArrowLeft' && currentIndex > 0) {
-        selectEvent(currentIndex - 1);
+    // Render thumbnails.
+    function renderThumbnails() {
+        dom.events.innerHTML = ''
+        const frag = document.createDocumentFragment()
+        state.events.forEach((event, index) => {
+            const img = document.createElement('img')
+            img.className = 'event-item'
+            img.dataset.index = index
+            if (isImage(event.file)) {
+                img.src = `/data/${event.file}`
+            }
+            if (isVideo(event.file)) {
+                img.src = `/thumbnail/${event.file}`
+            }
+            frag.appendChild(img)
+        })
+        dom.events.appendChild(frag)
     }
-});
 
-/* Initialize */
-loadDates();
+    // Render either an image or video into the viewer pane.
+    function renderViewer(event) {
+        // Render an image.
+        if (isImage(event.file)) {
+            dom.viewer.innerHTML = ''
+            const img = document.createElement('img')
+            img.src = `/data/${event.file}`
+            dom.viewer.appendChild(img)
+        }
+        // Render a video.
+        if (isVideo(event.file)) {
+            dom.viewer.innerHTML = ''
+            const video = document.createElement('video')
+            video.addEventListener('focus', () => video.blur())
+            video.autoplay = true
+            video.className = 'controls'
+            video.controls = true
+            video.loop = true
+            video.muted = true
+            video.setAttribute('tabindex', '-1')
+            video.src = `/data/${event.file}`
+            dom.viewer.appendChild(video)
+        }
+    }
+
+    // Handle date selection via event delegation.
+    dom.dates.addEventListener('click', (event) => {
+        const item = event.target.closest('.date-item')
+        if (!item) {
+            return
+        }
+        selectDate(item.dataset.date)
+    })
+
+    // Handle thumbnail selection via event delegation.
+    dom.events.addEventListener('click', (event) => {
+        const item = event.target.closest('.event-item')
+        if (!item) {
+            return
+        }
+        selectEvent(Number(item.dataset.index))
+    })
+
+    // Enable keyboard navigation and video playback control.
+    document.addEventListener('keydown', (event) => {
+        if (!state.events.length) {
+            return
+        }
+        const video = dom.viewer.querySelector('video')
+        switch (event.code) {
+            // Select next event.
+            case 'ArrowRight':
+                event.preventDefault()
+                selectEvent(state.index + 1)
+                break
+            // Select previous event.
+            case 'ArrowLeft':
+                event.preventDefault()
+                selectEvent(state.index - 1)
+                break
+            // Play / Pause.
+            case 'Space':
+                event.preventDefault()
+                if (!video) {
+                    return
+                }
+                if (video.paused) {
+                    video.play()
+                } else {
+                    video.pause()
+                }
+                break
+            // Move the playhead a quarter second backwards.
+            case 'KeyJ':
+                event.preventDefault()
+                video.currentTime = Math.max(video.currentTime - 0.25, 0)
+                break
+            // Move the playhead a quarter second forwards.
+            case 'KeyL':
+                event.preventDefault()
+                video.currentTime = Math.min(
+                    video.currentTime + 0.25,
+                    video.duration,
+                )
+                break
+        }
+    })
+
+    // Entrypoint.
+    async function main() {
+        try {
+            const dates = await safeFetchJSON('/api/list')
+            dom.dates.innerHTML = ''
+            const frag = document.createDocumentFragment()
+            dates.forEach((date) => {
+                const div = document.createElement('div')
+                div.className = 'date-item'
+                div.dataset.date = date
+                div.textContent = date
+                frag.appendChild(div)
+            })
+            dom.dates.appendChild(frag)
+            if (dates.length > 0) {
+                selectDate(dates[0])
+            }
+        } catch (err) {
+            console.error('Failed to load dates:', err)
+        }
+    }
+
+    // Begin.
+    main()
+})()
