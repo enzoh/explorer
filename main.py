@@ -184,13 +184,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_error(404, 'Not Found')
             return
 
-        # Guess the content type.
+        # Define the content type.
         content_type, _ = mimetypes.guess_type(file)
         content_type = content_type or 'application/octet-stream'
 
+        # Define the cache control policy.
+        if file.suffix in {'.css', '.js'}:
+            cache_control = 'max-age=0, must-revalidate, no-cache, no-store'
+        else:
+            cache_control = 'immutable, max-age=3600, private'
+
         # Set the response headers.
         self.send_response(200)
-        self.send_header('Cache-Control', 'private, max-age=3600')
+        self.send_header('Cache-Control', cache_control)
         self.send_header('Content-Length', str(file.stat().st_size))
         self.send_header('Content-Type', content_type)
         self.end_headers()
