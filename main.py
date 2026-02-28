@@ -13,45 +13,149 @@ import signal
 import socketserver
 import subprocess
 import threading
+import time
 import typing
 import urllib.parse
 
 
-def gen_thumbnail(input_file: str, output_file: str):
+class ThumbnailService:
 
-    logger = logging.getLogger('[gen_thumbnail]')
+    def __init__(self, data_dir: pathlib.Path, thumbnail_dir: pathlib.Path):
+        self._counter = 0
+        self._counter_lock = threading.Lock()
+        self._data_dir = data_dir.resolve()
+        self._event = threading.Event()
+        self._event.set()
+        self._limit = 1024
+        self._logger = logging.getLogger('[ThumbnailService]')
+        self._pattern = re.compile(r'^[0-9a-f]{2}$')
+        self._thumbnail_dir = thumbnail_dir.resolve()
+        self._thumbnail_dir.mkdir(parents=True, exist_ok=True)
 
-    # The FFmpeg command.
-    command = [
-        'ffmpeg', '-ss', '5.0', '-i', input_file, '-ss', '0', '-vframes', '1',
-        '-q:v', '2', output_file
-    ]
+    def _hash(self, name: str) -> str:
+        return hashlib.sha256(name.encode('utf-8')).hexdigest() + '.jpg'
 
-    # Run the FFmpeg command.
-    try:
-        result = subprocess.run(
-            command,
-            start_new_session=True,
-            stderr=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-            timeout=30,
-        )
+    def _partition(self, path: pathlib.Path):
 
-    # Catch timeout.
-    except subprocess.TimeoutExpired:
-        logger.error('FFmpeg subprocess timed out')
-        return
+        # Step 1: Create subdirectories 00..ff.
+        for i in range(256):
+            bucket = path / f'{i:02x}'
+            bucket.mkdir(exist_ok=True)
 
-    # Check if an error occured.
-    if result.returncode != 0:
-        if result.stderr:
-            for line in result.stderr.splitlines():
-                logger.debug(line.decode('utf-8', errors='replace'))
-        logger.warning(
-            'FFmpeg subprocess exited with non-zero exit code %d',
-            result.returncode,
-        )
+        # Step 2: Move files into corresponding subdirectories.
+        for source in path.iterdir():
+            if not source.is_file():
+                continue
+            prefix = source.name[:2]
+            if not self._pattern.fullmatch(prefix):
+                continue
+            bucket = path / prefix
+            if not bucket.is_dir():
+                self._logger.error('Bucket is not a directory: %s', bucket)
+                continue
+            suffix = source.name[2:]
+            target = bucket / suffix
+            try:
+                source.rename(target)
+            except FileNotFoundError:
+                self._logger.debug('File disappeared mid-move: %s', target)
+                continue
+
+    def _search(self, path: pathlib.Path, query: str) -> typing.List[str]:
+        if len(query) <= 2:
+            return [query]
+        prefix = query[:2]
+        bucket = path / prefix
+        if not bucket.exists() or not bucket.is_dir():
+            return [query]
+        suffix = query[2:]
+        return [prefix] + self._search(bucket, suffix)
+
+    def lookup(self, name: str) -> typing.Optional[str]:
+        result = self._search(self._thumbnail_dir, self._hash(name))
+        target = self._thumbnail_dir.joinpath(*result)
+        exists = target.exists() and target.is_file()
+        return str(pathlib.Path(*result)) if exists else None
+
+    def generate(self, name: str) -> str:
+
+        # Wait if partitioning is in progress.
+        self._event.wait()
+
+        # Increment the instance counter.
+        with self._counter_lock:
+            self._counter += 1
+
+        # Identify the bucket.
+        try:
+            while True:
+                result = self._search(self._thumbnail_dir, self._hash(name))
+                suffix = result.pop()
+                bucket = self._thumbnail_dir.joinpath(*result)
+
+                # Count the number of files within the bucket.
+                count = sum(1 for f in bucket.iterdir() if f.is_file())
+
+                # Check if the number of files is within the limit.
+                if count <= self._limit:
+                    break
+
+                # Trigger partitioning.
+                self._event.clear()
+
+                # Wait for all other instances to complete.
+                while True:
+                    with self._counter_lock:
+                        if self._counter == 1:
+                            break
+                    time.sleep(0.05)
+
+                self._partition(bucket)
+                self._event.set()
+
+            source = self._data_dir.joinpath(name)
+            target = bucket / suffix
+            self._generate(source, target)
+            return str(target)
+
+        # Decrement the instance counter.
+        finally:
+            with self._counter_lock:
+                self._counter -= 1
+
+    def _generate(self, source: str, target: str):
+
+        # The FFmpeg command.
+        command = [
+            'ffmpeg', '-ss', '5.0', '-i', source, '-ss', '0', '-vframes', '1',
+            '-q:v', '2', target
+        ]
+
+        # Run the FFmpeg command.
+        try:
+            result = subprocess.run(
+                command,
+                start_new_session=True,
+                stderr=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                timeout=30,
+            )
+
+        # Catch timeout.
+        except subprocess.TimeoutExpired:
+            self._logger.error('FFmpeg subprocess timed out')
+            return
+
+        # Check if an error occured.
+        if result.returncode != 0:
+            if result.stderr:
+                for line in result.stderr.splitlines():
+                    self._logger.debug(line.decode('utf-8', errors='replace'))
+            self._logger.warning(
+                'FFmpeg subprocess exited with non-zero exit code %d',
+                result.returncode,
+            )
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -128,7 +232,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         # Resolve the date directory.
-        date_dir = self.config_data_dir.resolve().joinpath(date)
+        date_dir = self.config_data_dir.joinpath(date)
 
         # Check if date directory exists.
         if not date_dir.exists() or not date_dir.is_dir():
@@ -235,17 +339,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def send_thumbnail(self, data_suffix: str):
 
-        # Resolve the data and thumbnail directories.
-        data_dir = self.config_data_dir.resolve()
-        thumbnail_dir = self.config_thumbnail_dir.resolve()
-
-        # Resolve the data file.
+        # Resolve the data directory and file.
+        data_dir = self.config_data_dir
         data_file = data_dir.joinpath(data_suffix)
-
-        # Resolve the thumbnail file.
-        digest = hashlib.sha256(data_suffix.encode('utf-8')).hexdigest()
-        thumbnail_suffix = digest + '.jpg'
-        thumbnail_file = thumbnail_dir.joinpath(thumbnail_suffix)
 
         # Reject non-MP4 data files.
         if not data_suffix.endswith('.mp4'):
@@ -263,14 +359,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         # Check if the thumbnail file exists.
-        if not thumbnail_file.exists() or not thumbnail_file.is_file():
-            thumbnail_dir.mkdir(parents=True, exist_ok=True)
-            gen_thumbnail(str(data_file), str(thumbnail_file))
-
-        # TODO: Rebalance file system here.
+        thumbnail_suffix = self.config_thumbnail_service.lookup(data_suffix)
+        if thumbnail_suffix is None:
+            thumbnail_suffix = self.config_thumbnail_service.generate(
+                data_suffix)
 
         # Send the thrumbnail file to the client.
-        self.send_file(thumbnail_dir, thumbnail_suffix)
+        self.send_file(self.config_thumbnail_dir, thumbnail_suffix)
 
 
 # Entry point.
@@ -352,9 +447,11 @@ def main():
 
     # Configure the request handler.
     class HandlerWithConfig(Handler):
-        config_data_dir = args.data_dir
-        config_static_dir = args.static_dir
-        config_thumbnail_dir = args.thumbnail_dir
+        config_data_dir = args.data_dir.resolve()
+        config_static_dir = args.static_dir.resolve()
+        config_thumbnail_dir = args.thumbnail_dir.resolve()
+        config_thumbnail_service = ThumbnailService(config_data_dir,
+                                                    config_thumbnail_dir)
 
     # Start the web server.
     socket_addr = (args.listen_ip, args.listen_port)
